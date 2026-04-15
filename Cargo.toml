@@ -1,0 +1,21 @@
+[package]
+name = "glry"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
+crossterm = "0.29"
+image = "0.25"
+kamadak-exif = "0.6"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+anyhow = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rayon = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,318 @@
+//! Application state and key dispatch.
+
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
+use ratatui_image::Resize;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::{Protocol, StatefulProtocol};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+use crate::scan::{self, Entry, ImageEntry};
+use crate::thumbnail::{LoadKind, ThumbWorker};
+
+/// Fixed grid cell size in terminal cells. Each thumbnail occupies this area.
+pub const GRID_CELL_W: u16 = 16;
+pub const GRID_CELL_H: u16 = 8;
+pub const GRID_GAP: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Grid,
+    List,
+}
+
+pub struct App {
+    /// Current working directory.
+    pub cwd: PathBuf,
+    /// Entries in the current directory: parent + subdirs + images.
+    pub entries: Vec<Entry>,
+    /// Currently selected entry index (0..entries.len()).
+    pub selected: usize,
+    /// Active view mode (toggled with Tab).
+    pub view: ViewMode,
+    /// When Some, render the fullscreen viewer for this entry index.
+    pub fullscreen_idx: Option<usize>,
+
+    /// Built grid-thumbnail protocols, keyed by source image path.
+    pub thumbs: HashMap<PathBuf, Protocol>,
+    /// Built resizable protocols (used by both fullscreen and list-preview).
+    pub fulls: HashMap<PathBuf, StatefulProtocol>,
+    /// Original (pre-display) pixel dimensions of fully-loaded images.
+    pub full_dims: HashMap<PathBuf, (u32, u32)>,
+    /// Per-path error message, if a load failed.
+    pub errors: HashMap<PathBuf, String>,
+    /// In-flight (path, kind) to dedupe dispatches.
+    pub requested: HashSet<(PathBuf, LoadKind)>,
+
+    pub picker: Picker,
+    pub worker: ThumbWorker,
+
+    /// Vim "gg" — true after first 'g' is pressed; cleared on next key.
+    pub pending_g: bool,
+    pub should_quit: bool,
+    /// Status-bar message (transient feedback).
+    pub status: Option<String>,
+
+    /// Number of columns the grid view rendered last frame. Used so j/k
+    /// jumps a row's worth of entries.
+    pub last_grid_cols: u16,
+    /// Top row offset for the grid view's vertical scroll.
+    pub grid_scroll_row: usize,
+}
+
+impl App {
+    pub fn new(start_dir: PathBuf, picker: Picker, worker: ThumbWorker) -> Result<Self> {
+        let entries = scan::scan(&start_dir)?;
+        let selected = first_selectable(&entries);
+        Ok(Self {
+            cwd: start_dir,
+            entries,
+            selected,
+            view: ViewMode::Grid,
+            fullscreen_idx: None,
+            thumbs: HashMap::new(),
+            fulls: HashMap::new(),
+            full_dims: HashMap::new(),
+            errors: HashMap::new(),
+            requested: HashSet::new(),
+            picker,
+            worker,
+            pending_g: false,
+            should_quit: false,
+            status: None,
+            last_grid_cols: 1,
+            grid_scroll_row: 0,
+        })
+    }
+
+    /// Re-scan a directory. Clears per-directory caches (in-memory only;
+    /// the on-disk thumbnail cache is preserved across navigation).
+    pub fn enter_dir(&mut self, path: PathBuf) -> Result<()> {
+        let entries = scan::scan(&path)?;
+        self.cwd = path;
+        self.selected = first_selectable(&entries);
+        self.entries = entries;
+        self.thumbs.clear();
+        self.fulls.clear();
+        self.full_dims.clear();
+        self.errors.clear();
+        self.requested.clear();
+        self.fullscreen_idx = None;
+        self.status = None;
+        self.grid_scroll_row = 0;
+        Ok(())
+    }
+
+    pub fn selected_entry(&self) -> Option<&Entry> {
+        self.entries.get(self.selected)
+    }
+
+    /// Request a grid thumbnail load if it isn't already in progress or done.
+    pub fn ensure_thumb(&mut self, entry: &ImageEntry) {
+        let key = (entry.path.clone(), LoadKind::Thumb);
+        if self.thumbs.contains_key(&entry.path)
+            || self.errors.contains_key(&entry.path)
+            || self.requested.contains(&key)
+        {
+            return;
+        }
+        self.requested.insert(key);
+        self.worker.dispatch_thumb(entry.clone());
+    }
+
+    /// Request a full-resolution load if it isn't already in progress or done.
+    pub fn ensure_full(&mut self, path: &PathBuf) {
+        let key = (path.clone(), LoadKind::Full);
+        if self.fulls.contains_key(path) || self.requested.contains(&key) {
+            return;
+        }
+        self.requested.insert(key);
+        self.worker.dispatch_full(path.clone());
+    }
+
+    /// Drain completed loads from the worker and turn them into protocols.
+    pub fn drain_loads(&mut self) {
+        for done in self.worker.drain() {
+            self.requested.remove(&(done.source_path.clone(), done.kind));
+            match done.result {
+                Err(e) => {
+                    self.errors
+                        .insert(done.source_path.clone(), format!("{e:#}"));
+                }
+                Ok(img) => match done.kind {
+                    LoadKind::Thumb => {
+                        // Build a fixed-size Protocol fitted to one grid cell.
+                        let area = Rect::new(0, 0, GRID_CELL_W, GRID_CELL_H);
+                        match self.picker.new_protocol(img, area, Resize::Fit(None)) {
+                            Ok(proto) => {
+                                self.thumbs.insert(done.source_path, proto);
+                            }
+                            Err(e) => {
+                                self.errors
+                                    .insert(done.source_path, format!("protocol: {e:#}"));
+                            }
+                        }
+                    }
+                    LoadKind::Full => {
+                        let dims = (img.width(), img.height());
+                        let proto = self.picker.new_resize_protocol(img);
+                        self.full_dims.insert(done.source_path.clone(), dims);
+                        self.fulls.insert(done.source_path, proto);
+                    }
+                },
+            }
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Fullscreen viewer has its own key map.
+        if self.fullscreen_idx.is_some() {
+            self.handle_key_fullscreen(key);
+            return Ok(());
+        }
+
+        let was_pending_g = self.pending_g;
+        self.pending_g = false;
+        self.status = None;
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            (KeyCode::Tab, _) => {
+                self.view = match self.view {
+                    ViewMode::Grid => ViewMode::List,
+                    ViewMode::List => ViewMode::Grid,
+                };
+            }
+            (KeyCode::Char('g'), _) => {
+                if was_pending_g {
+                    self.select_first();
+                } else {
+                    self.pending_g = true;
+                }
+            }
+            (KeyCode::Char('G'), _) => self.select_last(),
+            (KeyCode::Char('h'), _) | (KeyCode::Left, _) => self.move_horiz(-1),
+            (KeyCode::Char('l'), _) | (KeyCode::Right, _) => self.move_horiz(1),
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.move_vert(1),
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.move_vert(-1),
+            (KeyCode::PageDown, _) => self.page(1),
+            (KeyCode::PageUp, _) => self.page(-1),
+            (KeyCode::Home, _) => self.select_first(),
+            (KeyCode::End, _) => self.select_last(),
+            (KeyCode::Enter, _) => self.activate_selection()?,
+            (KeyCode::Backspace, _) => self.go_up()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_key_fullscreen(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.fullscreen_idx = None,
+            KeyCode::Left | KeyCode::Char('h') => self.fullscreen_step(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.fullscreen_step(1),
+            _ => {}
+        }
+    }
+
+    fn fullscreen_step(&mut self, dir: isize) {
+        let Some(start) = self.fullscreen_idx else {
+            return;
+        };
+        let n = self.entries.len() as isize;
+        if n == 0 {
+            return;
+        }
+        let mut i = start as isize;
+        for _ in 0..n {
+            i = (i + dir).rem_euclid(n);
+            if let Some(Entry::Image(_)) = self.entries.get(i as usize) {
+                self.fullscreen_idx = Some(i as usize);
+                self.selected = i as usize;
+                return;
+            }
+        }
+    }
+
+    fn move_vert(&mut self, delta: isize) {
+        // Grid: jump a row's worth of entries. List: single step.
+        let step = match self.view {
+            ViewMode::Grid => self.last_grid_cols.max(1) as isize,
+            ViewMode::List => 1,
+        };
+        self.move_linear(delta * step);
+    }
+
+    fn move_horiz(&mut self, delta: isize) {
+        // List mode has no horizontal navigation.
+        if self.view == ViewMode::Grid {
+            self.move_linear(delta);
+        }
+    }
+
+    fn page(&mut self, dir: isize) {
+        match self.view {
+            ViewMode::Grid => self.move_vert(3 * dir),
+            ViewMode::List => self.move_linear(10 * dir),
+        }
+    }
+
+    /// Linear move of the selection by `delta`, clamped to entry range.
+    pub fn move_linear(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let n = self.entries.len() as isize;
+        let new = (self.selected as isize + delta).clamp(0, n - 1);
+        self.selected = new as usize;
+    }
+
+    pub fn select_first(&mut self) {
+        if !self.entries.is_empty() {
+            self.selected = 0;
+        }
+    }
+
+    pub fn select_last(&mut self) {
+        if !self.entries.is_empty() {
+            self.selected = self.entries.len() - 1;
+        }
+    }
+
+    fn activate_selection(&mut self) -> Result<()> {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Ok(());
+        };
+        match entry {
+            Entry::Parent(p) | Entry::SubDir { path: p, .. } => self.enter_dir(p)?,
+            Entry::Image(img) => {
+                self.fullscreen_idx = Some(self.selected);
+                self.ensure_full(&img.path);
+            }
+        }
+        Ok(())
+    }
+
+    fn go_up(&mut self) -> Result<()> {
+        if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf()) {
+            self.enter_dir(parent)?;
+        }
+        Ok(())
+    }
+}
+
+/// Returns the index of the first entry that is selectable on entry into a
+/// directory: prefer the first image, then the first subdir, else 0.
+fn first_selectable(entries: &[Entry]) -> usize {
+    if let Some(i) = entries.iter().position(|e| matches!(e, Entry::Image(_))) {
+        return i;
+    }
+    if let Some(i) = entries.iter().position(|e| matches!(e, Entry::SubDir { .. })) {
+        return i;
+    }
+    0
+}
