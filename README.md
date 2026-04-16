@@ -108,6 +108,8 @@ In the fullscreen viewer:
 - `b` toggles the header and status bars.
 - `c` toggles fill mode, cropping the image to the terminal's aspect ratio
   so it fills the viewport edge-to-edge.
+- `a` opens an AI describe overlay for the current image (requires config
+  opt-in and the `SWIFTROUTER_API_KEY` env var — see *AI describe* below).
 
 ## Supported formats
 
@@ -149,7 +151,29 @@ thumbnail_crop = true
 # Hide the header and status bars when opening the fullscreen viewer.
 # The `b` key always toggles them; this just sets the initial state.
 fullscreen_hide_bars = false
+
+# AI "describe this image" (press `a` in fullscreen). Requires the
+# SWIFTROUTER_API_KEY environment variable. The endpoint must speak the
+# OpenAI chat-completions shape (SwiftRouter is the default).
+ai_enabled  = false
+ai_base_url = "https://api.swiftrouter.com/v1"
+ai_model    = "gpt-5.4-mini"
 ```
+
+## AI describe
+
+When `ai_enabled = true` *and* the `SWIFTROUTER_API_KEY` environment
+variable is set, pressing `a` in the fullscreen viewer posts the current
+image to an OpenAI-compatible chat-completions endpoint and shows the
+assistant's reply in a centered overlay. Esc or `a` again closes it.
+
+The default endpoint is [SwiftRouter](https://swiftrouter.com); any
+vision-capable, OpenAI-compatible gateway works — override `ai_base_url`
+and `ai_model`. The image is downscaled to 1024 px on the longest side
+and uploaded as a base64 PNG data URL.
+
+The feature is off by default so glry's baseline does not talk to the
+network.
 
 ## Cache
 

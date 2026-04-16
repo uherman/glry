@@ -11,6 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::ai::AiConfig;
+
 /// Resolved color palette used everywhere in the UI.
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
@@ -42,7 +44,7 @@ impl Default for Theme {
 }
 
 /// All user-configurable settings: theme + behavioral options.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub theme: Theme,
     /// Center-crop grid thumbnails to the cell aspect so every cell is filled.
@@ -51,6 +53,9 @@ pub struct Config {
     /// Hide the header and status bars by default in the fullscreen viewer.
     /// The `b` key still toggles them at runtime. Default `false`.
     pub fullscreen_hide_bars: bool,
+    /// Settings for the AI-describe feature. Disabled unless the user opts
+    /// in AND the token env var is set (see [`crate::ai`]).
+    pub ai: AiConfig,
 }
 
 impl Default for Config {
@@ -59,6 +64,7 @@ impl Default for Config {
             theme: Theme::default(),
             thumbnail_crop: true,
             fullscreen_hide_bars: false,
+            ai: AiConfig::default(),
         }
     }
 }
@@ -94,6 +100,13 @@ const DEFAULT_CONFIG: &str = "\
 # Start the fullscreen viewer with the header and status bars hidden.
 # Press `b` in fullscreen to toggle them at runtime (default: false).
 # fullscreen_hide_bars = false
+
+# AI \"describe this image\" (press `a` in fullscreen). Requires the
+# SWIFTROUTER_API_KEY environment variable. The endpoint must speak the
+# OpenAI chat-completions shape (SwiftRouter is the default).
+# ai_enabled  = false
+# ai_base_url = \"https://api.swiftrouter.com/v1\"
+# ai_model    = \"gpt-5.4-mini\"
 ";
 
 /// Load config from `~/.config/glry/config`. If the file is missing, write a
@@ -159,6 +172,16 @@ fn load_from(path: &Path) -> Result<Config> {
                     lineno + 1,
                 ),
             },
+            "ai_enabled" => match parse_bool(value) {
+                Some(b) => cfg.ai.enabled = b,
+                None => eprintln!(
+                    "glry: {}:{}: invalid bool `{value}` for `{key}` (use true/false)",
+                    path.display(),
+                    lineno + 1,
+                ),
+            },
+            "ai_base_url" => cfg.ai.base_url = value.to_string(),
+            "ai_model" => cfg.ai.model = value.to_string(),
             "header_fg" | "header_bg" | "selection_fg" | "selection_bg" | "status_fg"
             | "status_bg" | "directory_fg" | "error_fg" | "loading_fg" => {
                 let color = match Color::from_str(value) {
@@ -205,11 +228,9 @@ fn parse_bool(s: &str) -> Option<bool> {
 
 fn write_default(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    fs::write(path, DEFAULT_CONFIG)
-        .with_context(|| format!("writing {}", path.display()))?;
+    fs::write(path, DEFAULT_CONFIG).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

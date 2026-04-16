@@ -11,9 +11,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::ai::{AiConfig, AiWorker};
 use crate::config::Theme;
 use crate::scan::{self, Entry, ImageEntry};
 use crate::thumbnail::{LoadKind, LoadPayload, ThumbWorker};
+
+/// Per-path state of the AI describe feature. Stored in
+/// [`App::ai_results`] so pressing `a` on an already-described image just
+/// re-opens the overlay without a new round trip.
+pub enum AiState {
+    /// Overlay opened before the full-res image was decoded. Transitions
+    /// to [`AiState::Requesting`] once decoding finishes.
+    AwaitingDecode,
+    /// The describe request is in flight on the gateway.
+    Requesting,
+    /// Final assistant content.
+    Ready(String),
+    /// Request failed.
+    Error(String),
+}
 
 /// Fixed grid cell size in terminal cells. Each thumbnail occupies this area.
 pub const GRID_CELL_W: u16 = 16;
@@ -177,15 +193,33 @@ pub struct App {
 
     /// Color palette loaded from the user config.
     pub theme: Theme,
+
+    /// AI config + runtime state. `ai_active` is `true` only when the user
+    /// enabled the feature AND a token was found in the environment; UI
+    /// paths check this single flag instead of re-checking the env each time.
+    pub ai_cfg: AiConfig,
+    pub ai_token: Option<String>,
+    pub ai_active: bool,
+    pub ai_worker: AiWorker,
+    /// When `Some`, the fullscreen overlay is rendered for this path.
+    /// Toggled by the `a` key (and cleared on Esc).
+    pub ai_overlay: Option<PathBuf>,
+    /// Cached describe states, keyed by image path. A `Loading` entry means
+    /// a dispatch is in flight; replaced with `Ready` or `Error` on drain.
+    pub ai_results: HashMap<PathBuf, AiState>,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         start_dir: PathBuf,
         picker: Arc<Picker>,
         worker: ThumbWorker,
         theme: Theme,
         hide_bars_default: bool,
+        ai_cfg: AiConfig,
+        ai_token: Option<String>,
+        ai_active: bool,
     ) -> Result<Self> {
         let entries = scan::scan(&start_dir)?;
         let selected = first_selectable(&entries);
@@ -217,6 +251,12 @@ impl App {
             last_grid_cols: 1,
             grid_scroll_row: 0,
             theme,
+            ai_cfg,
+            ai_token,
+            ai_active,
+            ai_worker: AiWorker::new(),
+            ai_overlay: None,
+            ai_results: HashMap::new(),
         })
     }
 
@@ -236,6 +276,7 @@ impl App {
         self.errors.clear();
         self.requested.clear();
         self.fullscreen_idx = None;
+        self.ai_overlay = None;
         self.status = None;
         self.grid_scroll_row = 0;
         Ok(())
@@ -291,16 +332,17 @@ impl App {
     /// Drain completed loads from the worker and turn them into protocols.
     /// Returns `true` if any loads were processed.
     pub fn drain_loads(&mut self) -> bool {
+        let ai_changed = self.drain_ai();
         let completed = self.worker.drain();
         if completed.is_empty() {
-            return false;
+            return ai_changed;
         }
         for done in completed {
-            self.requested.remove(&(done.source_path.clone(), done.kind));
+            self.requested
+                .remove(&(done.source_path.clone(), done.kind));
             match done.payload {
                 Err(e) => {
-                    self.errors
-                        .insert(done.source_path, format!("{e:#}"));
+                    self.errors.insert(done.source_path, format!("{e:#}"));
                 }
                 Ok(LoadPayload::Thumb(proto)) => {
                     self.thumbs.insert(done.source_path, proto);
@@ -433,19 +475,108 @@ impl App {
         // like "Fit"/"Fill"/"Copied …" don't shadow the per-image info bar.
         self.status = None;
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.fullscreen_idx = None,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if self.ai_overlay.is_some() {
+                    self.ai_overlay = None;
+                } else {
+                    self.fullscreen_idx = None;
+                }
+            }
             KeyCode::Left | KeyCode::Char('h') => self.fullscreen_step(-1),
             KeyCode::Right | KeyCode::Char('l') => self.fullscreen_step(1),
             KeyCode::Char('y') => self.copy_to_clipboard(),
             KeyCode::Char('b') => self.fullscreen_bars_hidden = !self.fullscreen_bars_hidden,
             KeyCode::Char('c') => {
                 self.fullscreen_crop = !self.fullscreen_crop;
-                self.status = Some(
-                    if self.fullscreen_crop { "Fill" } else { "Fit" }.to_string(),
-                );
+                self.status = Some(if self.fullscreen_crop { "Fill" } else { "Fit" }.to_string());
             }
+            KeyCode::Char('a') => self.toggle_ai_overlay(),
             _ => {}
         }
+    }
+
+    /// Toggle the AI describe overlay for the current fullscreen image.
+    /// Dispatches a describe request on first open when no prior result is
+    /// cached. Requires the AI feature to be active; otherwise shows a
+    /// status hint.
+    fn toggle_ai_overlay(&mut self) {
+        if self.ai_overlay.is_some() {
+            self.ai_overlay = None;
+            return;
+        }
+        if !self.ai_active {
+            self.status = Some(
+                "AI disabled — set ai_enabled = true in config and export SWIFTROUTER_API_KEY"
+                    .to_string(),
+            );
+            return;
+        }
+        let Some(idx) = self.fullscreen_idx else {
+            return;
+        };
+        let Some(Entry::Image(img)) = self.entries.get(idx).cloned() else {
+            return;
+        };
+        self.ai_overlay = Some(img.path.clone());
+        if self.ai_results.contains_key(&img.path) {
+            // A prior Ready/Error result, or a dispatch already in flight.
+            return;
+        }
+        // Can't describe what we haven't decoded yet. Kick off the full
+        // load if needed and mark the overlay as awaiting decode; the next
+        // drain will notice the image and dispatch the describe.
+        if let Some(image) = self.full_images.get(&img.path).cloned() {
+            self.dispatch_describe(img.path, image);
+        } else {
+            self.ai_results
+                .insert(img.path.clone(), AiState::AwaitingDecode);
+            self.ensure_full(&img.path);
+        }
+    }
+
+    fn dispatch_describe(&mut self, path: PathBuf, image: DynamicImage) {
+        let Some(token) = self.ai_token.clone() else {
+            self.ai_results.insert(
+                path,
+                AiState::Error("SWIFTROUTER_API_KEY not set".to_string()),
+            );
+            return;
+        };
+        self.ai_results.insert(path.clone(), AiState::Requesting);
+        self.ai_worker
+            .dispatch(path, image, self.ai_cfg.clone(), token);
+    }
+
+    /// Drain completed describe jobs and, if an overlay was waiting on a
+    /// decode, dispatch now that the image is ready. Returns `true` if any
+    /// AI state changed (caller should redraw).
+    fn drain_ai(&mut self) -> bool {
+        let mut changed = false;
+        for done in self.ai_worker.drain() {
+            match done.result {
+                Ok(s) => {
+                    self.ai_results.insert(done.path, AiState::Ready(s));
+                }
+                Err(e) => {
+                    self.ai_results
+                        .insert(done.path, AiState::Error(format!("{e:#}")));
+                }
+            }
+            changed = true;
+        }
+        // Was an overlay blocked on decode? Dispatch now that the image exists.
+        let to_dispatch = self
+            .ai_overlay
+            .clone()
+            .filter(|p| matches!(self.ai_results.get(p), Some(AiState::AwaitingDecode)))
+            .filter(|p| self.full_images.contains_key(p));
+        if let Some(path) = to_dispatch
+            && let Some(image) = self.full_images.get(&path).cloned()
+        {
+            self.dispatch_describe(path, image);
+            changed = true;
+        }
+        changed
     }
 
     fn fullscreen_step(&mut self, dir: isize) {
@@ -462,6 +593,10 @@ impl App {
             if let Some(Entry::Image(img)) = self.entries.get(i as usize).cloned() {
                 self.fullscreen_idx = Some(i as usize);
                 self.selected = i as usize;
+                // Overlay always describes the currently-visible image;
+                // dismiss it on navigation so the user doesn't see a stale
+                // description sitting over a different image.
+                self.ai_overlay = None;
                 // Start loading immediately rather than waiting for the next render.
                 self.ensure_full(&img.path);
                 // Preload the next image in the same direction for snappier navigation.
@@ -636,9 +771,7 @@ fn copy_image(img: DynamicImage) -> Result<()> {
         .with_context(|| format!("writing image to {cmd}"))?;
     drop(stdin);
 
-    let status = child
-        .wait()
-        .with_context(|| format!("waiting for {cmd}"))?;
+    let status = child.wait().with_context(|| format!("waiting for {cmd}"))?;
     if !status.success() {
         anyhow::bail!("{cmd} exited with {status}");
     }
@@ -651,7 +784,10 @@ fn first_selectable(entries: &[Entry]) -> usize {
     if let Some(i) = entries.iter().position(|e| matches!(e, Entry::Image(_))) {
         return i;
     }
-    if let Some(i) = entries.iter().position(|e| matches!(e, Entry::SubDir { .. })) {
+    if let Some(i) = entries
+        .iter()
+        .position(|e| matches!(e, Entry::SubDir { .. }))
+    {
         return i;
     }
     0
