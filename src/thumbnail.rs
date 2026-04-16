@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use image::imageops::{self, FilterType};
-use image::DynamicImage;
+use image::{AnimationDecoder, DynamicImage};
 use ratatui::layout::Rect;
 use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
@@ -20,12 +20,21 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::cache;
 use crate::scan::ImageEntry;
 
 /// Maximum dimension (width or height in pixels) for grid thumbnails.
 pub const THUMB_MAX_DIM: u32 = 256;
+
+/// Maximum dimension (width or height in pixels) for animation frames.
+/// Each cached frame becomes a terminal image upload, and Kitty has a
+/// per-session image-storage budget (default ~320 MiB). At fullscreen
+/// pixel sizes a 50-frame GIF would blow past that and force evictions
+/// (which surface as flickering and lost grid thumbnails). Capping the
+/// source dim caps the per-frame upload at roughly DIM² × 4 bytes.
+pub const ANIMATION_MAX_DIM: u32 = 768;
 
 /// Target pixel aspect ratio (width, height) for center-cropped thumbnails.
 /// When set, [`load_thumbnail`] crops the decoded image to this aspect before
@@ -125,6 +134,76 @@ pub fn load_original(path: &Path) -> Result<DynamicImage> {
     decode_with_orientation(path)
 }
 
+/// A single decoded animation frame: image pixels plus the delay before the
+/// next frame should be shown.
+pub struct AnimationFrame {
+    pub image: DynamicImage,
+    pub delay: Duration,
+}
+
+/// GIFs with delays at or below this threshold are coerced to
+/// [`SHORT_DELAY_REPLACEMENT`]. Matches Chromium/Firefox behavior, where a
+/// 0/1ms delay is treated as 100ms — most "no delay" GIFs were authored
+/// against that convention and run unwatchably fast otherwise.
+const SHORT_DELAY_THRESHOLD: Duration = Duration::from_millis(10);
+const SHORT_DELAY_REPLACEMENT: Duration = Duration::from_millis(100);
+
+/// Return true if `path`'s extension marks it as an animation-capable format
+/// (GIF). The file header isn't inspected.
+pub fn is_animated_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false)
+}
+
+/// Decode every frame of an animated image, downscaling each to at most
+/// `max_dim` pixels on the longest side. Returns the frames with their delays
+/// and the original pixel dimensions of the first frame.
+pub fn load_animation(
+    path: &Path,
+    max_dim: u32,
+) -> Result<(Vec<AnimationFrame>, (u32, u32))> {
+    use image::codecs::gif::GifDecoder;
+
+    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let decoder =
+        GifDecoder::new(reader).with_context(|| format!("decoding {}", path.display()))?;
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .with_context(|| format!("decoding frames of {}", path.display()))?;
+
+    if frames.is_empty() {
+        anyhow::bail!("no frames in {}", path.display());
+    }
+
+    let first = &frames[0];
+    let original_dims = (first.buffer().width(), first.buffer().height());
+
+    let out: Vec<AnimationFrame> = frames
+        .into_iter()
+        .map(|f| {
+            let raw_delay: Duration = f.delay().into();
+            let delay = if raw_delay <= SHORT_DELAY_THRESHOLD {
+                SHORT_DELAY_REPLACEMENT
+            } else {
+                raw_delay
+            };
+            let img = DynamicImage::ImageRgba8(f.into_buffer());
+            let img = if img.width() > max_dim || img.height() > max_dim {
+                img.resize(max_dim, max_dim, FilterType::Triangle)
+            } else {
+                img
+            };
+            AnimationFrame { image: img, delay }
+        })
+        .collect();
+
+    Ok((out, original_dims))
+}
+
 /// Decode an image and apply EXIF orientation.
 fn decode_with_orientation(path: &Path) -> Result<DynamicImage> {
     // Read EXIF first (cheap — just the file header) so the OS page cache is
@@ -148,6 +227,7 @@ fn read_exif_orientation(path: &Path) -> Option<u32> {
 pub enum LoadKind {
     Thumb,
     Full,
+    Animation,
 }
 
 /// The payload sent back to the main thread once a load completes.
@@ -157,6 +237,12 @@ pub enum LoadPayload {
     /// Downscaled image for fullscreen, with the original pixel dimensions.
     Full {
         image: DynamicImage,
+        original_dims: (u32, u32),
+    },
+    /// Decoded animation frames with per-frame delays and the original pixel
+    /// dimensions of the first frame.
+    Animation {
+        frames: Vec<AnimationFrame>,
         original_dims: (u32, u32),
     },
 }
@@ -239,6 +325,26 @@ impl ThumbWorker {
                 kind: LoadKind::Full,
                 payload: result.map(|(image, original_dims)| LoadPayload::Full {
                     image,
+                    original_dims,
+                }),
+            });
+        });
+    }
+
+    /// Dispatch an animation load. Each frame is downscaled aggressively
+    /// (see [`ANIMATION_MAX_DIM`]) to keep the cumulative upload size for
+    /// all frames within the terminal's image storage budget.
+    pub fn dispatch_animation(&self, path: PathBuf) {
+        let tx = self.tx.clone();
+        let p = path.clone();
+        let max_dim = ANIMATION_MAX_DIM.min(self.max_full_dim);
+        rayon::spawn(move || {
+            let result = load_animation(&p, max_dim);
+            let _ = tx.send(LoadDone {
+                source_path: p,
+                kind: LoadKind::Animation,
+                payload: result.map(|(frames, original_dims)| LoadPayload::Animation {
+                    frames,
                     original_dims,
                 }),
             });

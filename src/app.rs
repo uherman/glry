@@ -3,11 +3,13 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use image::DynamicImage;
+use ratatui::layout::Rect;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::{Protocol, StatefulProtocol};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::Theme;
 use crate::scan::{self, Entry, ImageEntry};
@@ -34,6 +36,82 @@ pub struct FillProto {
     pub proto: StatefulProtocol,
 }
 
+/// A decoded animated image kept in memory for fullscreen playback.
+///
+/// Holds one fit-mode `StatefulProtocol` per frame (built eagerly on load,
+/// so each frame-switch is just a map lookup), the raw `DynamicImage` for
+/// each frame (used to build fill-mode protocols on demand), and the
+/// per-frame delays. `current`/`last_advance` track playback position.
+///
+/// `fit_protos` and `fill_protos` cache one pre-encoded protocol per frame
+/// for the area in `fit_area`/`fill_area`. Caching matters: each fresh
+/// protocol gets a unique terminal image id and re-uploads its pixels, so
+/// rebuilding mid-playback would flood the terminal and evict grid
+/// thumbnails on Kitty. Both caches are invalidated when the area changes
+/// and re-built eagerly so frame advances during playback are pure
+/// placeholder swaps.
+///
+/// `fit_target` and `fill_target` are the centered render rects (computed
+/// from the source dims) that the cached protos are encoded for. Rendering
+/// at these rects avoids `Resize::Scale`'s upscale-to-area, which would
+/// blow up each frame's upload to terminal-pixel size.
+pub struct Animation {
+    pub frames: Vec<StatefulProtocol>,
+    pub images: Vec<DynamicImage>,
+    pub delays: Vec<Duration>,
+    pub current: usize,
+    pub last_advance: Instant,
+    pub original_dims: (u32, u32),
+    pub fit_area: Option<(u16, u16)>,
+    pub fit_target: Rect,
+    pub fill_protos: Vec<Option<StatefulProtocol>>,
+    pub fill_area: Option<(u16, u16)>,
+    pub fill_target: Rect,
+    /// Static first-frame protocol for the list-view preview. Kept separate
+    /// from the fullscreen caches so switching list ↔ fullscreen doesn't
+    /// re-encode (and re-upload) every frame on every mode change.
+    pub preview_proto: Option<StatefulProtocol>,
+    pub preview_area: Option<(u16, u16)>,
+    pub preview_target: Rect,
+}
+
+impl Animation {
+    /// Advance `current` by as many frames as the elapsed time covers.
+    /// Returns `true` if the frame index changed.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        if self.frames.len() <= 1 {
+            return false;
+        }
+        let mut advanced = false;
+        // Cap the catch-up to one full loop of frames so a long sleep
+        // (e.g. laptop suspend) doesn't turn this into a tight loop.
+        for _ in 0..self.frames.len() {
+            let delay = self.delays[self.current];
+            if now.duration_since(self.last_advance) < delay {
+                return advanced;
+            }
+            self.current = (self.current + 1) % self.frames.len();
+            self.last_advance += delay;
+            advanced = true;
+        }
+        // Still behind after a full cycle: snap forward so the next tick is
+        // measured from now rather than the distant past.
+        self.last_advance = now;
+        advanced
+    }
+
+    /// How long until the current frame's delay elapses. `Duration::ZERO`
+    /// means a tick is already due.
+    pub fn next_tick_in(&self, now: Instant) -> Duration {
+        if self.frames.len() <= 1 {
+            return Duration::from_secs(3600);
+        }
+        let delay = self.delays[self.current];
+        let elapsed = now.duration_since(self.last_advance);
+        delay.saturating_sub(elapsed)
+    }
+}
+
 pub struct App {
     /// Current working directory.
     pub cwd: PathBuf,
@@ -57,6 +135,9 @@ pub struct App {
     pub thumbs: HashMap<PathBuf, Protocol>,
     /// Built resizable protocols (used by both fullscreen and list-preview).
     pub fulls: HashMap<PathBuf, StatefulProtocol>,
+    /// Decoded animations keyed by source image path. Populated instead of
+    /// `fulls` for animated formats (e.g. GIF).
+    pub animations: HashMap<PathBuf, Animation>,
     /// Downscaled `DynamicImage` kept alongside each entry in `fulls`, so the
     /// fullscreen "fill" mode can rebuild an aspect-cropped protocol without
     /// re-decoding from disk.
@@ -120,6 +201,7 @@ impl App {
             fullscreen_crop: false,
             thumbs: HashMap::new(),
             fulls: HashMap::new(),
+            animations: HashMap::new(),
             full_images: HashMap::new(),
             fill_proto: None,
             full_dims: HashMap::new(),
@@ -147,6 +229,7 @@ impl App {
         self.entries = entries;
         self.thumbs.clear();
         self.fulls.clear();
+        self.animations.clear();
         self.full_images.clear();
         self.fill_proto = None;
         self.full_dims.clear();
@@ -176,13 +259,27 @@ impl App {
     }
 
     /// Request a full-resolution load if it isn't already in progress or done.
+    /// Animated formats (e.g. GIF) are routed to the animation loader so the
+    /// viewer can play them back.
     pub fn ensure_full(&mut self, path: &PathBuf) {
-        let key = (path.clone(), LoadKind::Full);
-        if self.fulls.contains_key(path) || self.requested.contains(&key) {
+        if self.errors.contains_key(path) {
             return;
         }
-        self.requested.insert(key);
-        self.worker.dispatch_full(path.clone());
+        if crate::thumbnail::is_animated_path(path) {
+            let key = (path.clone(), LoadKind::Animation);
+            if self.animations.contains_key(path) || self.requested.contains(&key) {
+                return;
+            }
+            self.requested.insert(key);
+            self.worker.dispatch_animation(path.clone());
+        } else {
+            let key = (path.clone(), LoadKind::Full);
+            if self.fulls.contains_key(path) || self.requested.contains(&key) {
+                return;
+            }
+            self.requested.insert(key);
+            self.worker.dispatch_full(path.clone());
+        }
     }
 
     /// Returns `true` if any in-flight loads are pending (used for adaptive
@@ -219,9 +316,71 @@ impl App {
                     let proto = self.picker.new_resize_protocol(image);
                     self.fulls.insert(done.source_path, proto);
                 }
+                Ok(LoadPayload::Animation {
+                    frames,
+                    original_dims,
+                }) => {
+                    self.full_dims
+                        .insert(done.source_path.clone(), original_dims);
+                    let mut protos = Vec::with_capacity(frames.len());
+                    let mut images = Vec::with_capacity(frames.len());
+                    let mut delays = Vec::with_capacity(frames.len());
+                    for f in frames {
+                        protos.push(self.picker.new_resize_protocol(f.image.clone()));
+                        images.push(f.image);
+                        delays.push(f.delay);
+                    }
+                    let frame_count = protos.len();
+                    self.animations.insert(
+                        done.source_path,
+                        Animation {
+                            frames: protos,
+                            images,
+                            delays,
+                            current: 0,
+                            last_advance: Instant::now(),
+                            original_dims,
+                            fit_area: None,
+                            fit_target: Rect::default(),
+                            fill_protos: (0..frame_count).map(|_| None).collect(),
+                            fill_area: None,
+                            fill_target: Rect::default(),
+                            preview_proto: None,
+                            preview_area: None,
+                            preview_target: Rect::default(),
+                        },
+                    );
+                }
             }
         }
         true
+    }
+
+    /// Advance any animation whose current frame's delay has elapsed.
+    /// Returns `true` if any frame changed (caller should redraw).
+    pub fn tick_animations(&mut self) -> bool {
+        let Some(idx) = self.fullscreen_idx else {
+            return false;
+        };
+        let Some(Entry::Image(img)) = self.entries.get(idx) else {
+            return false;
+        };
+        let Some(anim) = self.animations.get_mut(&img.path) else {
+            return false;
+        };
+        anim.tick(Instant::now())
+    }
+
+    /// The shortest wait until the next animation frame should be shown for
+    /// the currently-visible animation, if any.
+    pub fn next_animation_tick(&self) -> Option<Duration> {
+        let idx = self.fullscreen_idx?;
+        let entry = self.entries.get(idx)?;
+        let Entry::Image(img) = entry else {
+            return None;
+        };
+        let anim = self.animations.get(&img.path)?;
+        Some(anim.next_tick_in(Instant::now()))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {

@@ -4,10 +4,12 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui_image::StatefulImage;
+use ratatui_image::picker::Picker;
+use ratatui_image::{Resize, ResizeEncodeRender, StatefulImage};
 
-use crate::app::App;
+use crate::app::{Animation, App};
 use crate::scan::Entry;
+use crate::ui::fullscreen::centered_fit_rect;
 
 pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
@@ -66,6 +68,15 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
         Entry::Image(img) => {
             let theme = app.theme;
             app.ensure_full(&img.path);
+            if let Some(anim) = app.animations.get_mut(&img.path) {
+                ensure_anim_preview(anim, area, &app.picker);
+                let target = anim.preview_target;
+                if let Some(proto) = anim.preview_proto.as_mut() {
+                    let widget = StatefulImage::default();
+                    f.render_stateful_widget(widget, target, proto);
+                    return;
+                }
+            }
             if let Some(proto) = app.fulls.get_mut(&img.path) {
                 let widget = StatefulImage::default();
                 f.render_stateful_widget(widget, area, proto);
@@ -80,4 +91,25 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
+}
+
+/// Build (and pre-encode) a static first-frame protocol for the list-view
+/// preview if the cache is missing or sized for a different area. Kept
+/// separate from the fullscreen caches so toggling between the two modes
+/// doesn't re-encode every frame on each switch.
+fn ensure_anim_preview(anim: &mut Animation, area: Rect, picker: &Picker) {
+    if anim.images.is_empty() {
+        return;
+    }
+    let area_key = (area.width, area.height);
+    if anim.preview_area == Some(area_key) && anim.preview_proto.is_some() {
+        return;
+    }
+    let src = &anim.images[0];
+    let target = centered_fit_rect(area, src.width(), src.height(), picker.font_size());
+    let mut proto = picker.new_resize_protocol(src.clone());
+    proto.resize_encode(&Resize::Fit(None), target);
+    anim.preview_area = Some(area_key);
+    anim.preview_target = target;
+    anim.preview_proto = Some(proto);
 }

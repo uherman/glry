@@ -115,6 +115,10 @@ fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, cfg: Config) -> 
         if app.drain_loads() {
             app.dirty = true;
         }
+        // Advance the fullscreen animation (if any) before rendering.
+        if app.tick_animations() {
+            app.dirty = true;
+        }
 
         if app.dirty {
             execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
@@ -124,11 +128,16 @@ fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, cfg: Config) -> 
         }
 
         // Adaptive poll: short timeout when loads are in-flight for responsive
-        // updates, longer when idle to save CPU.
-        let timeout = if app.has_pending_loads() {
+        // updates, longer when idle to save CPU. If an animation is playing,
+        // wake in time for its next frame.
+        let base = if app.has_pending_loads() {
             Duration::from_millis(32)
         } else {
             Duration::from_millis(100)
+        };
+        let timeout = match app.next_animation_tick() {
+            Some(d) => base.min(d.max(Duration::from_millis(1))),
+            None => base,
         };
 
         if event::poll(timeout)? {

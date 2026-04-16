@@ -14,6 +14,8 @@ graphics protocol (Kitty, iTerm2, or Sixel) and renders accordingly.
 - **Grid and list views** with `Tab` to switch between them.
 - **Fullscreen viewer** with stepping between images, aspect-fill mode, and
   togglable chrome.
+- **Animated GIF playback** in the fullscreen viewer, honoring per-frame
+  delays.
 - **Vim-style navigation** (`hjkl`, `gg`, `G`, `q`) alongside arrow keys.
 - **Directory traversal** via the `..` entry or `Backspace`.
 - **EXIF-aware orientation** so rotated photos display correctly.
