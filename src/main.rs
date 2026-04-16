@@ -1,5 +1,6 @@
 //! `glry` — TUI image gallery.
 
+mod ai;
 mod app;
 mod cache;
 mod config;
@@ -49,8 +50,8 @@ fn main() -> Result<()> {
     // Query the terminal for graphics capabilities BEFORE entering the
     // alternate screen / raw mode — the query writes CSI sequences to stdout
     // and reads replies from stdin, and is cleaner outside the TUI display.
-    let picker = Picker::from_query_stdio()
-        .context("querying terminal for graphics capabilities")?;
+    let picker =
+        Picker::from_query_stdio().context("querying terminal for graphics capabilities")?;
 
     // Load user config before entering the TUI so parse errors are visible.
     let cfg = config::load();
@@ -107,8 +108,30 @@ fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, cfg: Config) -> 
 
     let picker = Arc::new(picker);
     let thumb_area = Rect::new(0, 0, GRID_CELL_W, GRID_CELL_H);
-    let worker = ThumbWorker::new(cache_dir, Arc::clone(&picker), thumb_area, max_full_dim, crop);
-    let mut app = App::new(start_dir, picker, worker, cfg.theme, cfg.fullscreen_hide_bars)?;
+    let worker = ThumbWorker::new(
+        cache_dir,
+        Arc::clone(&picker),
+        thumb_area,
+        max_full_dim,
+        crop,
+    );
+
+    // Only activate the AI feature if both the user enabled it *and* a token
+    // is actually present in the environment — avoids a confusing "press a"
+    // path that always fails on misconfiguration.
+    let ai_token = std::env::var(ai::TOKEN_ENV).ok();
+    let ai_active = cfg.ai.enabled && ai_token.is_some();
+
+    let mut app = App::new(
+        start_dir,
+        picker,
+        worker,
+        cfg.theme,
+        cfg.fullscreen_hide_bars,
+        cfg.ai,
+        ai_token,
+        ai_active,
+    )?;
 
     while !app.should_quit {
         // Drain any completed background loads before rendering.

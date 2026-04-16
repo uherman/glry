@@ -3,11 +3,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui_image::picker::Picker;
 use ratatui_image::{Resize, ResizeEncodeRender, StatefulImage};
 
-use crate::app::{Animation, App, FillProto};
+use crate::app::{AiState, Animation, App, FillProto};
 use crate::scan::Entry;
 use crate::thumbnail::center_crop_to_aspect;
 
@@ -18,8 +18,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(Entry::Image(img)) = app.entries.get(idx).cloned() else {
         return;
     };
-    let theme = app.theme;
     app.ensure_full(&img.path);
+    render_image(f, area, app, &img);
+    render_ai_overlay(f, area, app);
+}
+
+fn render_image(f: &mut Frame, area: Rect, app: &mut App, img: &crate::scan::ImageEntry) {
+    let theme = app.theme;
 
     if app.fullscreen_crop {
         if let Some(anim) = app.animations.get_mut(&img.path) {
@@ -73,26 +78,87 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
         let y_offset = area.height / 2;
         if y_offset > 0 && area.height > y_offset {
             let inner = Rect::new(area.x, area.y + y_offset, area.width, 1);
-            let p = Paragraph::new(label)
-                .alignment(Alignment::Center)
-                .style(
-                    Style::default()
-                        .fg(theme.loading_fg)
-                        .add_modifier(Modifier::ITALIC),
-                );
+            let p = Paragraph::new(label).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(theme.loading_fg)
+                    .add_modifier(Modifier::ITALIC),
+            );
             f.render_widget(p, inner);
         }
     }
 }
 
+/// Render the AI-describe modal overlay, if one is open for the current
+/// image. Uses ratatui's `Clear` so the terminal image protocol's pixels
+/// don't bleed through the text box.
+fn render_ai_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let Some(path) = app.ai_overlay.as_ref() else {
+        return;
+    };
+    let state = app.ai_results.get(path);
+
+    let (title, body, style) = match state {
+        Some(AiState::AwaitingDecode) | Some(AiState::Requesting) => (
+            " AI describe ",
+            "Describing…".to_string(),
+            Style::default()
+                .fg(app.theme.loading_fg)
+                .add_modifier(Modifier::ITALIC),
+        ),
+        Some(AiState::Ready(s)) => (
+            " AI describe ",
+            s.clone(),
+            Style::default().fg(app.theme.status_fg),
+        ),
+        Some(AiState::Error(e)) => (
+            " AI error ",
+            e.clone(),
+            Style::default().fg(app.theme.error_fg),
+        ),
+        None => return,
+    };
+
+    let modal = centered_modal_rect(area, 70, 50);
+    if modal.width == 0 || modal.height == 0 {
+        return;
+    }
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(app.theme.header_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(app.theme.status_bg));
+    let hint = "\n\n  press a or Esc to close";
+    let text = format!("{body}{hint}");
+    let para = Paragraph::new(text)
+        .block(block)
+        .style(style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, modal);
+}
+
+/// Centered modal sized to `cols` columns wide and `rows` rows tall (both
+/// expressed as percentages of `area`, clamped to a sensible minimum so
+/// the box doesn't collapse on small terminals).
+fn centered_modal_rect(area: Rect, cols_pct: u16, rows_pct: u16) -> Rect {
+    let w = ((area.width as u32 * cols_pct as u32 / 100) as u16)
+        .max(20)
+        .min(area.width);
+    let h = ((area.height as u32 * rows_pct as u32 / 100) as u16)
+        .max(6)
+        .min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
 /// Sub-rect of `area` that the image will occupy under `Resize::Fit`,
 /// centered so the letterbox margins are split evenly on both sides.
-pub(super) fn centered_fit_rect(
-    area: Rect,
-    img_w: u32,
-    img_h: u32,
-    font_size: (u16, u16),
-) -> Rect {
+pub(super) fn centered_fit_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)) -> Rect {
     let (fw, fh) = (font_size.0 as u32, font_size.1 as u32);
     if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 || fw == 0 || fh == 0 {
         return area;
@@ -159,14 +225,18 @@ fn ensure_anim_fill(anim: &mut Animation, area: Rect, picker: &Picker) {
         return;
     }
     let area_key = (area.width, area.height);
-    let cached = anim.fill_area == Some(area_key)
-        && anim.fill_protos.iter().all(|p| p.is_some());
+    let cached = anim.fill_area == Some(area_key) && anim.fill_protos.iter().all(|p| p.is_some());
     if cached {
         return;
     }
 
     let first_cropped = center_crop_to_aspect(anim.images[0].clone(), (aspect_w, aspect_h));
-    let target = centered_fit_rect(area, first_cropped.width(), first_cropped.height(), (fw, fh));
+    let target = centered_fit_rect(
+        area,
+        first_cropped.width(),
+        first_cropped.height(),
+        (fw, fh),
+    );
 
     anim.fill_area = Some(area_key);
     anim.fill_target = target;
