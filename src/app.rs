@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use image::DynamicImage;
 use ratatui::layout::Rect;
 use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
@@ -48,6 +49,10 @@ pub struct App {
 
     pub picker: Picker,
     pub worker: ThumbWorker,
+    /// Tiny placeholder protocol rendered while a full image is loading.
+    /// Going through StatefulImage ensures protocol-specific cleanup of the
+    /// previous image (e.g. Kitty overlay deletion).
+    pub loading_proto: StatefulProtocol,
 
     /// Vim "gg" — true after first 'g' is pressed; cleared on next key.
     pub pending_g: bool,
@@ -66,6 +71,7 @@ impl App {
     pub fn new(start_dir: PathBuf, picker: Picker, worker: ThumbWorker) -> Result<Self> {
         let entries = scan::scan(&start_dir)?;
         let selected = first_selectable(&entries);
+        let loading_proto = picker.new_resize_protocol(DynamicImage::new_rgba8(1, 1));
         Ok(Self {
             cwd: start_dir,
             entries,
@@ -79,6 +85,7 @@ impl App {
             requested: HashSet::new(),
             picker,
             worker,
+            loading_proto,
             pending_g: false,
             should_quit: false,
             status: None,
@@ -230,9 +237,27 @@ impl App {
         let mut i = start as isize;
         for _ in 0..n {
             i = (i + dir).rem_euclid(n);
-            if let Some(Entry::Image(_)) = self.entries.get(i as usize) {
+            if let Some(Entry::Image(img)) = self.entries.get(i as usize).cloned() {
                 self.fullscreen_idx = Some(i as usize);
                 self.selected = i as usize;
+                // Start loading immediately rather than waiting for the next render.
+                self.ensure_full(&img.path);
+                // Preload the next image in the same direction for snappier navigation.
+                self.preload_adjacent(i as usize, dir);
+                return;
+            }
+        }
+    }
+
+    /// Preload the next image in `dir` from `current` so it's ready if the
+    /// user keeps navigating in the same direction.
+    fn preload_adjacent(&mut self, current: usize, dir: isize) {
+        let n = self.entries.len() as isize;
+        let mut i = current as isize;
+        for _ in 0..n {
+            i = (i + dir).rem_euclid(n);
+            if let Some(Entry::Image(img)) = self.entries.get(i as usize).cloned() {
+                self.ensure_full(&img.path);
                 return;
             }
         }
