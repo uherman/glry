@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, FillProto};
 use crate::scan::Entry;
@@ -23,15 +23,20 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     if app.fullscreen_crop {
         ensure_fill_proto(app, &img.path, area);
         if let Some(fill) = app.fill_proto.as_mut() {
-            let widget = StatefulImage::default();
+            let widget = StatefulImage::default().resize(Resize::Scale(None));
             f.render_stateful_widget(widget, area, &mut fill.proto);
             return;
         }
     }
 
     if let Some(proto) = app.fulls.get_mut(&img.path) {
+        let target = app
+            .full_images
+            .get(&img.path)
+            .map(|src| centered_fit_rect(area, src.width(), src.height(), app.picker.font_size()))
+            .unwrap_or(area);
         let widget = StatefulImage::default();
-        f.render_stateful_widget(widget, area, proto);
+        f.render_stateful_widget(widget, target, proto);
     } else if let Some(err) = app.errors.get(&img.path) {
         // Render the blank placeholder to properly clear the previous image
         // overlay (Kitty/Sixel) through the image protocol's own cleanup.
@@ -60,6 +65,29 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
             f.render_widget(p, inner);
         }
     }
+}
+
+/// Sub-rect of `area` that the image will occupy under `Resize::Fit`,
+/// centered so the letterbox margins are split evenly on both sides.
+fn centered_fit_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)) -> Rect {
+    let (fw, fh) = (font_size.0 as u32, font_size.1 as u32);
+    if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 || fw == 0 || fh == 0 {
+        return area;
+    }
+    let avail_w = (area.width as u32) * fw;
+    let avail_h = (area.height as u32) * fh;
+    let target_w = avail_w.min(img_w);
+    let target_h = avail_h.min(img_h);
+    let wratio = target_w as f64 / img_w as f64;
+    let hratio = target_h as f64 / img_h as f64;
+    let ratio = f64::min(wratio, hratio);
+    let fit_w_px = (img_w as f64 * ratio).round().max(1.0) as u32;
+    let fit_h_px = (img_h as f64 * ratio).round().max(1.0) as u32;
+    let cells_w = ((fit_w_px as f32 / fw as f32).ceil() as u16).min(area.width);
+    let cells_h = ((fit_h_px as f32 / fh as f32).ceil() as u16).min(area.height);
+    let x = area.x + (area.width - cells_w) / 2;
+    let y = area.y + (area.height - cells_h) / 2;
+    Rect::new(x, y, cells_w, cells_h)
 }
 
 /// Rebuild `app.fill_proto` if it's missing, or doesn't match the current
