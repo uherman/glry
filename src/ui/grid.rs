@@ -14,6 +14,32 @@ const CELL_TOTAL_W: u16 = GRID_CELL_W + GRID_GAP;
 const CAPTION_H: u16 = 1;
 const CELL_TOTAL_H: u16 = GRID_CELL_H + CAPTION_H + GRID_GAP;
 
+/// Folder glyph drawn inside a 16×8 grid cell. Seven rows of ASCII art with
+/// one row of vertical padding on top.
+const FOLDER_ART: &str = concat!(
+    "\n",
+    ".----.______\n",
+    "|          |\n",
+    "|    ___________\n",
+    "|   /          /\n",
+    "|  /          /\n",
+    "| /          /\n",
+    "|/__________/",
+);
+
+/// Parent-directory glyph: same folder shape with `..` written on the front
+/// face so the "go up" affordance is visible at a glance.
+const PARENT_ART: &str = concat!(
+    "\n",
+    ".----.______\n",
+    "|   ..     |\n",
+    "|    ___________\n",
+    "|   /          /\n",
+    "|  /          /\n",
+    "| /          /\n",
+    "|/__________/",
+);
+
 pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     if area.width < GRID_CELL_W || area.height < GRID_CELL_H {
         return; // too small to draw anything sensible
@@ -80,12 +106,12 @@ fn render_cell(
     // The image area: thumbnail for images, glyph placeholder for dirs/parent.
     match entry {
         Entry::Parent(_) => {
-            let p = Paragraph::new("\n  [ .. ]")
+            let p = Paragraph::new(PARENT_ART)
                 .style(Style::default().fg(app.theme.directory_fg));
             f.render_widget(p, img_area);
         }
         Entry::SubDir { .. } => {
-            let p = Paragraph::new("\n   📁")
+            let p = Paragraph::new(FOLDER_ART)
                 .style(Style::default().fg(app.theme.directory_fg));
             f.render_widget(p, img_area);
         }
