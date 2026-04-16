@@ -44,7 +44,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
 
-      - name: Tag release
+      - name: Tag and release
         if: steps.version.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,3 +52,6 @@ jobs:
           tag="v${{ steps.version.outputs.current }}"
           git tag "$tag"
           git push origin "$tag"
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes
