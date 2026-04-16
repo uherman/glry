@@ -11,7 +11,8 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -91,7 +92,9 @@ fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker) -> Result<()> {
         // Drain any completed background loads before rendering.
         app.drain_loads();
 
+        execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
         terminal.draw(|f| ui::render(f, &mut app))?;
+        execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
 
         // Wait up to 100 ms for an input event; loop again either way so
         // background completions are picked up promptly.
