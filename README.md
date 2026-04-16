@@ -67,8 +67,10 @@ macOS and Windows work out of the box.
 | `Esc` / `q`              | Exit fullscreen, or quit            |
 | `Ctrl-C`                 | Quit                                |
 
-In fullscreen, `h` / `l` (or arrows) step to the previous / next image, and
-`b` toggles the header / status bars.
+In fullscreen, `h` / `l` (or arrows) step to the previous / next image, `b`
+toggles the header / status bars, and `c` toggles fill mode — the image is
+cropped to the terminal's aspect ratio so it fills edge-to-edge, trimming only
+what's needed.
 
 ## Supported formats
 

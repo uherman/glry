@@ -24,6 +24,16 @@ pub enum ViewMode {
     List,
 }
 
+/// Cached "fill" mode protocol for the fullscreen viewer. Stored outside
+/// `fulls` because it's specific to the current area's aspect ratio and gets
+/// rebuilt when that changes.
+pub struct FillProto {
+    pub path: PathBuf,
+    pub area_w: u16,
+    pub area_h: u16,
+    pub proto: StatefulProtocol,
+}
+
 pub struct App {
     /// Current working directory.
     pub cwd: PathBuf,
@@ -39,11 +49,23 @@ pub struct App {
     pub hide_bars_default: bool,
     /// Current state: hide header/status bars while in fullscreen.
     pub fullscreen_bars_hidden: bool,
+    /// When true, the fullscreen viewer crops the image to fill the area
+    /// instead of letterboxing it. Toggled with `c`.
+    pub fullscreen_crop: bool,
 
     /// Built grid-thumbnail protocols, keyed by source image path.
     pub thumbs: HashMap<PathBuf, Protocol>,
     /// Built resizable protocols (used by both fullscreen and list-preview).
     pub fulls: HashMap<PathBuf, StatefulProtocol>,
+    /// Downscaled `DynamicImage` kept alongside each entry in `fulls`, so the
+    /// fullscreen "fill" mode can rebuild an aspect-cropped protocol without
+    /// re-decoding from disk.
+    pub full_images: HashMap<PathBuf, DynamicImage>,
+    /// Single-slot cache for the fullscreen "fill" mode protocol: the image
+    /// is center-cropped to the current area's aspect ratio so `Resize::Fit`
+    /// renders it edge-to-edge without letterboxing. Rebuilt when the path or
+    /// area dimensions change.
+    pub fill_proto: Option<FillProto>,
     /// Original (pre-display) pixel dimensions of fully-loaded images.
     pub full_dims: HashMap<PathBuf, (u32, u32)>,
     /// Per-path error message, if a load failed.
@@ -95,8 +117,11 @@ impl App {
             fullscreen_idx: None,
             hide_bars_default,
             fullscreen_bars_hidden: hide_bars_default,
+            fullscreen_crop: false,
             thumbs: HashMap::new(),
             fulls: HashMap::new(),
+            full_images: HashMap::new(),
+            fill_proto: None,
             full_dims: HashMap::new(),
             errors: HashMap::new(),
             requested: HashSet::new(),
@@ -122,6 +147,8 @@ impl App {
         self.entries = entries;
         self.thumbs.clear();
         self.fulls.clear();
+        self.full_images.clear();
+        self.fill_proto = None;
         self.full_dims.clear();
         self.errors.clear();
         self.requested.clear();
@@ -187,6 +214,8 @@ impl App {
                 }) => {
                     self.full_dims
                         .insert(done.source_path.clone(), original_dims);
+                    self.full_images
+                        .insert(done.source_path.clone(), image.clone());
                     let proto = self.picker.new_resize_protocol(image);
                     self.fulls.insert(done.source_path, proto);
                 }
@@ -247,6 +276,12 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.fullscreen_step(1),
             KeyCode::Char('y') => self.copy_to_clipboard(),
             KeyCode::Char('b') => self.fullscreen_bars_hidden = !self.fullscreen_bars_hidden,
+            KeyCode::Char('c') => {
+                self.fullscreen_crop = !self.fullscreen_crop;
+                self.status = Some(
+                    if self.fullscreen_crop { "Fill" } else { "Fit" }.to_string(),
+                );
+            }
             _ => {}
         }
     }

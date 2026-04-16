@@ -77,7 +77,7 @@ fn cache_variant(crop: CropAspect) -> u64 {
 /// Center-crop `img` so its aspect matches `aspect_w:aspect_h`. If the image
 /// already matches (or degenerately has a zero dimension), returns it
 /// unchanged.
-fn center_crop_to_aspect(img: DynamicImage, (aspect_w, aspect_h): (u32, u32)) -> DynamicImage {
+pub fn center_crop_to_aspect(img: DynamicImage, (aspect_w, aspect_h): (u32, u32)) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || aspect_w == 0 || aspect_h == 0 {
         return img;
