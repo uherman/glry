@@ -61,7 +61,13 @@ graphics protocol (Kitty, iTerm2, or Sixel) and renders accordingly.
 
 ## Installation
 
-Install from the local checkout:
+Install from [crates.io](https://crates.io/crates/glry):
+
+```sh
+cargo install glry
+```
+
+Or from a local checkout:
 
 ```sh
 cargo install --path .

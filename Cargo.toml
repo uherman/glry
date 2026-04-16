@@ -1,6 +1,6 @@
 [package]
 name = "glry"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A terminal image gallery with thumbnails rendered as real pixels via Kitty, iTerm2, or Sixel."
 license = "MIT"
