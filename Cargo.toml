@@ -2,6 +2,14 @@
 name = "glry"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal image gallery with thumbnails rendered as real pixels via Kitty, iTerm2, or Sixel."
+license = "MIT"
+repository = "https://github.com/uherman/glry"
+homepage = "https://github.com/uherman/glry"
+readme = "README.md"
+keywords = ["tui", "terminal", "image", "gallery", "viewer"]
+categories = ["command-line-utilities", "multimedia::images"]
+exclude = [".assets/*", ".github/*"]
 
 [dependencies]
 ratatui = "0.30"
