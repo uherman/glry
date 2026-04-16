@@ -9,6 +9,30 @@ graphics protocol (Kitty, iTerm2, or Sixel) and renders accordingly.
 [ratatui]: https://github.com/ratatui-org/ratatui
 [ratatui-image]: https://github.com/benjajaja/ratatui-image
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src=".assets/grid.png" alt="Grid view" />
+      <br/>
+      <sub><b>Grid view</b> — thumbnail mosaic across a directory tree</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src=".assets/list.png" alt="List view" />
+      <br/>
+      <sub><b>List view</b> — compact listing with inline preview</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src=".assets/fullscreen.png" alt="Fullscreen viewer" />
+      <br/>
+      <sub><b>Fullscreen viewer</b> — aspect-fill rendering with togglable chrome</sub>
+    </td>
+  </tr>
+</table>
+
 ## Features
 
 - **Grid and list views** with `Tab` to switch between them.
