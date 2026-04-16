@@ -69,6 +69,12 @@ pub fn load_full(path: &Path, max_dim: u32) -> Result<(DynamicImage, (u32, u32))
     Ok((img, original_dims))
 }
 
+/// Load the original full-resolution image with EXIF rotation applied.
+/// Used for clipboard copy where we want the unmodified source pixels.
+pub fn load_original(path: &Path) -> Result<DynamicImage> {
+    decode_with_orientation(path)
+}
+
 /// Decode an image and apply EXIF orientation.
 fn decode_with_orientation(path: &Path) -> Result<DynamicImage> {
     // Read EXIF first (cheap — just the file header) so the OS page cache is

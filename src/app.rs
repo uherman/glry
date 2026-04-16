@@ -217,6 +217,7 @@ impl App {
             (KeyCode::End, _) => self.select_last(),
             (KeyCode::Enter, _) => self.activate_selection()?,
             (KeyCode::Backspace, _) => self.go_up()?,
+            (KeyCode::Char('y'), _) => self.copy_to_clipboard(),
             _ => {}
         }
         Ok(())
@@ -227,6 +228,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.fullscreen_idx = None,
             KeyCode::Left | KeyCode::Char('h') => self.fullscreen_step(-1),
             KeyCode::Right | KeyCode::Char('l') => self.fullscreen_step(1),
+            KeyCode::Char('y') => self.copy_to_clipboard(),
             _ => {}
         }
     }
@@ -332,6 +334,36 @@ impl App {
             self.enter_dir(parent)?;
         }
         Ok(())
+    }
+
+    /// Copy the currently selected image to the system clipboard.
+    fn copy_to_clipboard(&mut self) {
+        let path = match self.selected_entry() {
+            Some(Entry::Image(img)) => img.path.clone(),
+            _ => return,
+        };
+
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        match crate::thumbnail::load_original(&path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let data = arboard::ImageData {
+                    width: rgba.width() as usize,
+                    height: rgba.height() as usize,
+                    bytes: std::borrow::Cow::Borrowed(rgba.as_raw()),
+                };
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_image(data)) {
+                    Ok(()) => self.status = Some(format!("Copied {name}")),
+                    Err(e) => self.status = Some(format!("Clipboard error: {e}")),
+                }
+            }
+            Err(e) => self.status = Some(format!("Could not load image: {e:#}")),
+        }
     }
 }
 
