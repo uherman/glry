@@ -13,6 +13,11 @@ use ratatui::widgets::Paragraph;
 use crate::app::{App, ViewMode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
+    if app.fullscreen_idx.is_some() && app.fullscreen_bars_hidden {
+        fullscreen::render(f, f.area(), app);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

@@ -48,6 +48,9 @@ pub struct Config {
     /// Center-crop grid thumbnails to the cell aspect so every cell is filled.
     /// Default `true`; set to `false` for letterboxed full-image thumbnails.
     pub thumbnail_crop: bool,
+    /// Hide the header and status bars by default in the fullscreen viewer.
+    /// The `b` key still toggles them at runtime. Default `false`.
+    pub fullscreen_hide_bars: bool,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
         Self {
             theme: Theme::default(),
             thumbnail_crop: true,
+            fullscreen_hide_bars: false,
         }
     }
 }
@@ -86,6 +90,10 @@ const DEFAULT_CONFIG: &str = "\
 # Center-crop grid thumbnails to the cell aspect so every cell is filled
 # (default: true; set to false to letterbox each image inside its cell).
 # thumbnail_crop = true
+
+# Start the fullscreen viewer with the header and status bars hidden.
+# Press `b` in fullscreen to toggle them at runtime (default: false).
+# fullscreen_hide_bars = false
 ";
 
 /// Load config from `~/.config/glry/config`. If the file is missing, write a
@@ -137,6 +145,14 @@ fn load_from(path: &Path) -> Result<Config> {
         match key {
             "thumbnail_crop" => match parse_bool(value) {
                 Some(b) => cfg.thumbnail_crop = b,
+                None => eprintln!(
+                    "glry: {}:{}: invalid bool `{value}` for `{key}` (use true/false)",
+                    path.display(),
+                    lineno + 1,
+                ),
+            },
+            "fullscreen_hide_bars" => match parse_bool(value) {
+                Some(b) => cfg.fullscreen_hide_bars = b,
                 None => eprintln!(
                     "glry: {}:{}: invalid bool `{value}` for `{key}` (use true/false)",
                     path.display(),

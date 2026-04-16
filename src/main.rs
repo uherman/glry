@@ -108,7 +108,7 @@ fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, cfg: Config) -> 
     let picker = Arc::new(picker);
     let thumb_area = Rect::new(0, 0, GRID_CELL_W, GRID_CELL_H);
     let worker = ThumbWorker::new(cache_dir, Arc::clone(&picker), thumb_area, max_full_dim, crop);
-    let mut app = App::new(start_dir, picker, worker, cfg.theme)?;
+    let mut app = App::new(start_dir, picker, worker, cfg.theme, cfg.fullscreen_hide_bars)?;
 
     while !app.should_quit {
         // Drain any completed background loads before rendering.

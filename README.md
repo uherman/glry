@@ -67,7 +67,8 @@ macOS and Windows work out of the box.
 | `Esc` / `q`              | Exit fullscreen, or quit            |
 | `Ctrl-C`                 | Quit                                |
 
-In fullscreen, `h` / `l` (or arrows) step to the previous / next image.
+In fullscreen, `h` / `l` (or arrows) step to the previous / next image, and
+`b` toggles the header / status bars.
 
 ## Supported formats
 
@@ -102,6 +103,10 @@ loading_fg   = "darkgray"
 # Center-crop grid thumbnails to the cell aspect so every cell is filled.
 # Default is true; set to false to letterbox each image inside its cell.
 thumbnail_crop = true
+
+# Hide the header and status bars when opening the fullscreen viewer.
+# The `b` key always toggles them; this just sets the initial state.
+fullscreen_hide_bars = false
 ```
 
 ## Cache

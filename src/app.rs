@@ -35,6 +35,10 @@ pub struct App {
     pub view: ViewMode,
     /// When Some, render the fullscreen viewer for this entry index.
     pub fullscreen_idx: Option<usize>,
+    /// Config default for whether bars start hidden on fullscreen entry.
+    pub hide_bars_default: bool,
+    /// Current state: hide header/status bars while in fullscreen.
+    pub fullscreen_bars_hidden: bool,
 
     /// Built grid-thumbnail protocols, keyed by source image path.
     pub thumbs: HashMap<PathBuf, Protocol>,
@@ -78,6 +82,7 @@ impl App {
         picker: Arc<Picker>,
         worker: ThumbWorker,
         theme: Theme,
+        hide_bars_default: bool,
     ) -> Result<Self> {
         let entries = scan::scan(&start_dir)?;
         let selected = first_selectable(&entries);
@@ -88,6 +93,8 @@ impl App {
             selected,
             view: ViewMode::Grid,
             fullscreen_idx: None,
+            hide_bars_default,
+            fullscreen_bars_hidden: hide_bars_default,
             thumbs: HashMap::new(),
             fulls: HashMap::new(),
             full_dims: HashMap::new(),
@@ -239,6 +246,7 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.fullscreen_step(-1),
             KeyCode::Right | KeyCode::Char('l') => self.fullscreen_step(1),
             KeyCode::Char('y') => self.copy_to_clipboard(),
+            KeyCode::Char('b') => self.fullscreen_bars_hidden = !self.fullscreen_bars_hidden,
             _ => {}
         }
     }
@@ -333,6 +341,7 @@ impl App {
             Entry::Parent(p) | Entry::SubDir { path: p, .. } => self.enter_dir(p)?,
             Entry::Image(img) => {
                 self.fullscreen_idx = Some(self.selected);
+                self.fullscreen_bars_hidden = self.hide_bars_default;
                 self.ensure_full(&img.path);
             }
         }
