@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app::{App, GRID_CELL_H, GRID_CELL_W};
-use crate::config::Theme;
+use crate::config::Config;
 use crate::thumbnail::ThumbWorker;
 
 #[derive(Parser, Debug)]
@@ -53,11 +53,11 @@ fn main() -> Result<()> {
         .context("querying terminal for graphics capabilities")?;
 
     // Load user config before entering the TUI so parse errors are visible.
-    let theme = config::load();
+    let cfg = config::load();
 
     install_panic_hook();
     let mut terminal = init_terminal()?;
-    let result = run(&mut terminal, start_dir, picker, theme);
+    let result = run(&mut terminal, start_dir, picker, cfg);
     restore_terminal(&mut terminal).ok();
     result
 }
@@ -90,7 +90,7 @@ fn install_panic_hook() {
     }));
 }
 
-fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, theme: Theme) -> Result<()> {
+fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, cfg: Config) -> Result<()> {
     let cache_dir = cache::cache_dir()?;
 
     // Compute the maximum useful pixel dimension for full-resolution images.
@@ -101,10 +101,14 @@ fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker, theme: Theme) ->
         .max(term_size.height as u32 * font_size.1 as u32)
         .max(1920); // floor at 1080p so small terminals still get decent quality
 
+    // If cropping is on, center-crop to a square so thumbnails always render
+    // with equal width and height regardless of the terminal's font aspect.
+    let crop = cfg.thumbnail_crop.then_some((1, 1));
+
     let picker = Arc::new(picker);
     let thumb_area = Rect::new(0, 0, GRID_CELL_W, GRID_CELL_H);
-    let worker = ThumbWorker::new(cache_dir, Arc::clone(&picker), thumb_area, max_full_dim);
-    let mut app = App::new(start_dir, picker, worker, theme)?;
+    let worker = ThumbWorker::new(cache_dir, Arc::clone(&picker), thumb_area, max_full_dim, crop);
+    let mut app = App::new(start_dir, picker, worker, cfg.theme)?;
 
     while !app.should_quit {
         // Drain any completed background loads before rendering.

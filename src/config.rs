@@ -1,8 +1,9 @@
-//! User configuration. Reads a theme file from the platform config dir
+//! User configuration. Reads a config file from the platform config dir
 //! (`~/.config/glry/config` on Linux) using a minimal `key = value` syntax.
 //!
-//! Values are ratatui color strings: a named color (`red`, `darkgray`, …),
-//! an 8-bit index (`0`–`255`), or `#rrggbb`.
+//! Color values are ratatui color strings: a named color (`red`, `darkgray`,
+//! …), an 8-bit index (`0`–`255`), or `#rrggbb`. Boolean values are
+//! `true`/`false` (case-insensitive).
 
 use anyhow::{Context, Result};
 use ratatui::style::Color;
@@ -40,6 +41,24 @@ impl Default for Theme {
     }
 }
 
+/// All user-configurable settings: theme + behavioral options.
+#[derive(Debug, Clone, Copy)]
+pub struct Config {
+    pub theme: Theme,
+    /// Center-crop grid thumbnails to the cell aspect so every cell is filled.
+    /// Default `true`; set to `false` for letterboxed full-image thumbnails.
+    pub thumbnail_crop: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            thumbnail_crop: true,
+        }
+    }
+}
+
 /// Returns `~/.config/glry/config`, whether or not the file exists.
 pub fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("glry").join("config"))
@@ -50,8 +69,9 @@ pub fn config_path() -> Option<PathBuf> {
 const DEFAULT_CONFIG: &str = "\
 # glry configuration — uncomment a line to override the default.
 #
-# Values are ratatui color strings: a named color (black, red, darkgray, …),
-# an 8-bit index (0-255), or \"#rrggbb\" hex.
+# Color values are ratatui color strings: a named color (black, red,
+# darkgray, …), an 8-bit index (0-255), or \"#rrggbb\" hex.
+# Boolean values are `true` or `false`.
 
 # header_fg    = \"black\"
 # header_bg    = \"cyan\"
@@ -62,39 +82,43 @@ const DEFAULT_CONFIG: &str = "\
 # directory_fg = \"yellow\"
 # error_fg     = \"red\"
 # loading_fg   = \"darkgray\"
+
+# Center-crop grid thumbnails to the cell aspect so every cell is filled
+# (default: true; set to false to letterbox each image inside its cell).
+# thumbnail_crop = true
 ";
 
-/// Load theme from `~/.config/glry/config`. If the file is missing, write a
+/// Load config from `~/.config/glry/config`. If the file is missing, write a
 /// commented template and continue with defaults. Parse/unknown-key errors
 /// are reported to stderr and the bad entry is skipped.
-pub fn load() -> Theme {
+pub fn load() -> Config {
     let Some(path) = config_path() else {
-        return Theme::default();
+        return Config::default();
     };
     match load_from(&path) {
-        Ok(theme) => theme,
+        Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("glry: config {}: {e:#}", path.display());
-            Theme::default()
+            Config::default()
         }
     }
 }
 
-fn load_from(path: &Path) -> Result<Theme> {
+fn load_from(path: &Path) -> Result<Config> {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Err(e) = write_default(path) {
                 eprintln!("glry: could not write default config: {e:#}");
             }
-            return Ok(Theme::default());
+            return Ok(Config::default());
         }
         Err(e) => {
             return Err(e).with_context(|| format!("reading {}", path.display()));
         }
     };
 
-    let mut theme = Theme::default();
+    let mut cfg = Config::default();
     for (lineno, raw) in text.lines().enumerate() {
         let line = strip_comment(raw).trim();
         if line.is_empty() {
@@ -110,27 +134,41 @@ fn load_from(path: &Path) -> Result<Theme> {
         };
         let key = key.trim();
         let value = unquote(value.trim());
-        let color = match Color::from_str(value) {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!(
-                    "glry: {}:{}: invalid color `{value}` for `{key}`",
+        match key {
+            "thumbnail_crop" => match parse_bool(value) {
+                Some(b) => cfg.thumbnail_crop = b,
+                None => eprintln!(
+                    "glry: {}:{}: invalid bool `{value}` for `{key}` (use true/false)",
                     path.display(),
                     lineno + 1,
-                );
-                continue;
+                ),
+            },
+            "header_fg" | "header_bg" | "selection_fg" | "selection_bg" | "status_fg"
+            | "status_bg" | "directory_fg" | "error_fg" | "loading_fg" => {
+                let color = match Color::from_str(value) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        eprintln!(
+                            "glry: {}:{}: invalid color `{value}` for `{key}`",
+                            path.display(),
+                            lineno + 1,
+                        );
+                        continue;
+                    }
+                };
+                match key {
+                    "header_fg" => cfg.theme.header_fg = color,
+                    "header_bg" => cfg.theme.header_bg = color,
+                    "selection_fg" => cfg.theme.selection_fg = color,
+                    "selection_bg" => cfg.theme.selection_bg = color,
+                    "status_fg" => cfg.theme.status_fg = color,
+                    "status_bg" => cfg.theme.status_bg = color,
+                    "directory_fg" => cfg.theme.directory_fg = color,
+                    "error_fg" => cfg.theme.error_fg = color,
+                    "loading_fg" => cfg.theme.loading_fg = color,
+                    _ => unreachable!(),
+                }
             }
-        };
-        match key {
-            "header_fg" => theme.header_fg = color,
-            "header_bg" => theme.header_bg = color,
-            "selection_fg" => theme.selection_fg = color,
-            "selection_bg" => theme.selection_bg = color,
-            "status_fg" => theme.status_fg = color,
-            "status_bg" => theme.status_bg = color,
-            "directory_fg" => theme.directory_fg = color,
-            "error_fg" => theme.error_fg = color,
-            "loading_fg" => theme.loading_fg = color,
             _ => eprintln!(
                 "glry: {}:{}: unknown key `{key}`",
                 path.display(),
@@ -138,7 +176,15 @@ fn load_from(path: &Path) -> Result<Theme> {
             ),
         }
     }
-    Ok(theme)
+    Ok(cfg)
+}
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn write_default(path: &Path) -> Result<()> {

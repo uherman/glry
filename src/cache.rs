@@ -25,8 +25,10 @@ pub fn cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Compute a stable cache key for an image entry.
-pub fn key_for(entry: &ImageEntry) -> u64 {
+/// Compute a stable cache key for an image entry. `variant` distinguishes
+/// thumbnails rendered with different parameters (e.g. crop mode) so changing
+/// the config doesn't return a stale shape.
+pub fn key_for(entry: &ImageEntry, variant: u64) -> u64 {
     let mut h = Xxh3::new();
     h.update(entry.path.as_os_str().as_encoded_bytes());
     h.update(&entry.size.to_le_bytes());
@@ -36,6 +38,7 @@ pub fn key_for(entry: &ImageEntry) -> u64 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     h.update(&mtime_ns.to_le_bytes());
+    h.update(&variant.to_le_bytes());
     h.digest()
 }
 

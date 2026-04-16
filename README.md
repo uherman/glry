@@ -77,14 +77,15 @@ decodes.
 
 ## Configuration
 
-glry reads an optional theme file from `~/.config/glry/config` (or the
+glry reads an optional config file from `~/.config/glry/config` (or the
 platform equivalent on macOS/Windows). On first run glry writes a commented
 template there with the defaults shown; uncomment any line to override.
 Unknown keys and bad values are reported on stderr and skipped.
 
-Format is `key = value`, one per line, with `#` for comments. Values are
-ratatui color strings: a named color (`black`, `red`, `darkgray`, …), an
-8-bit index (`0`–`255`), or a `#rrggbb` hex code.
+Format is `key = value`, one per line, with `#` for comments. Color values
+are ratatui color strings: a named color (`black`, `red`, `darkgray`, …), an
+8-bit index (`0`–`255`), or a `#rrggbb` hex code. Boolean values are `true`
+or `false`.
 
 ```ini
 # ~/.config/glry/config
@@ -97,13 +98,18 @@ status_bg    = "black"
 directory_fg = "yellow"
 error_fg     = "red"
 loading_fg   = "darkgray"
+
+# Center-crop grid thumbnails to the cell aspect so every cell is filled.
+# Default is true; set to false to letterbox each image inside its cell.
+thumbnail_crop = true
 ```
 
 ## Cache
 
-Thumbnails are written to `~/.cache/glry/` (or the platform equivalent) as PNGs
-named by a 64-bit xxh3 of `(path, size, mtime)`. Safe to delete at any time;
-glry will regenerate on next view.
+Thumbnails are written to `~/.cache/glry/` (or the platform equivalent) as raw
+RGBA files named by a 64-bit xxh3 of `(path, size, mtime, crop-variant)`. Safe
+to delete at any time; glry will regenerate on next view. Changing
+`thumbnail_crop` produces a distinct cache entry so the old shape isn't reused.
 
 ## License
 

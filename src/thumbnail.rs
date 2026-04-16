@@ -9,7 +9,7 @@
 //! Both apply EXIF orientation; the `image` crate does not auto-rotate.
 
 use anyhow::{Context, Result};
-use image::imageops::FilterType;
+use image::imageops::{self, FilterType};
 use image::DynamicImage;
 use ratatui::layout::Rect;
 use ratatui_image::Resize;
@@ -27,10 +27,21 @@ use crate::scan::ImageEntry;
 /// Maximum dimension (width or height in pixels) for grid thumbnails.
 pub const THUMB_MAX_DIM: u32 = 256;
 
+/// Target pixel aspect ratio (width, height) for center-cropped thumbnails.
+/// When set, [`load_thumbnail`] crops the decoded image to this aspect before
+/// resizing so every rendered cell is filled uniformly. `None` preserves the
+/// original aspect (letterbox).
+pub type CropAspect = Option<(u32, u32)>;
+
 /// Load a thumbnail for `entry`, using the on-disk cache if available.
-/// Returns the decoded `DynamicImage` (post-rotation, post-resize).
-pub fn load_thumbnail(entry: &ImageEntry, cache_dir: &Path) -> Result<DynamicImage> {
-    let key = cache::key_for(entry);
+/// Returns the decoded `DynamicImage` (post-rotation, post-optional-crop,
+/// post-resize).
+pub fn load_thumbnail(
+    entry: &ImageEntry,
+    cache_dir: &Path,
+    crop: CropAspect,
+) -> Result<DynamicImage> {
+    let key = cache::key_for(entry, cache_variant(crop));
     let cached = cache::path_for(cache_dir, key);
 
     if cached.exists() {
@@ -41,7 +52,10 @@ pub fn load_thumbnail(entry: &ImageEntry, cache_dir: &Path) -> Result<DynamicIma
         let _ = fs::remove_file(&cached);
     }
 
-    let img = decode_with_orientation(&entry.path)?;
+    let mut img = decode_with_orientation(&entry.path)?;
+    if let Some(aspect) = crop {
+        img = center_crop_to_aspect(img, aspect);
+    }
     let thumb = img.thumbnail(THUMB_MAX_DIM, THUMB_MAX_DIM);
 
     if let Err(e) = cache::write_thumbnail(&cached, &thumb) {
@@ -49,6 +63,42 @@ pub fn load_thumbnail(entry: &ImageEntry, cache_dir: &Path) -> Result<DynamicIma
     }
 
     Ok(thumb)
+}
+
+/// Variant byte mixed into the cache key so toggling crop mode doesn't return
+/// a thumbnail in the wrong shape.
+fn cache_variant(crop: CropAspect) -> u64 {
+    match crop {
+        None => 0,
+        Some((w, h)) => ((w as u64) << 32) | h as u64,
+    }
+}
+
+/// Center-crop `img` so its aspect matches `aspect_w:aspect_h`. If the image
+/// already matches (or degenerately has a zero dimension), returns it
+/// unchanged.
+fn center_crop_to_aspect(img: DynamicImage, (aspect_w, aspect_h): (u32, u32)) -> DynamicImage {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 || aspect_w == 0 || aspect_h == 0 {
+        return img;
+    }
+    // Compare w/h vs aspect_w/aspect_h using cross-multiplication to avoid floats.
+    let image_ratio = w as u64 * aspect_h as u64;
+    let target_ratio = h as u64 * aspect_w as u64;
+    let (crop_w, crop_h) = if image_ratio > target_ratio {
+        // Image is wider than target: crop width.
+        let new_w = (h as u64 * aspect_w as u64 / aspect_h as u64) as u32;
+        (new_w.max(1), h)
+    } else if image_ratio < target_ratio {
+        // Image is taller than target: crop height.
+        let new_h = (w as u64 * aspect_h as u64 / aspect_w as u64) as u32;
+        (w, new_h.max(1))
+    } else {
+        return img;
+    };
+    let x = (w - crop_w) / 2;
+    let y = (h - crop_h) / 2;
+    DynamicImage::ImageRgba8(imageops::crop_imm(&img, x, y, crop_w, crop_h).to_image())
 }
 
 /// Load a full-resolution image, applying EXIF rotation, then downscale
@@ -130,10 +180,17 @@ pub struct ThumbWorker {
     picker: Arc<Picker>,
     thumb_area: Rect,
     max_full_dim: u32,
+    crop: CropAspect,
 }
 
 impl ThumbWorker {
-    pub fn new(cache_dir: PathBuf, picker: Arc<Picker>, thumb_area: Rect, max_full_dim: u32) -> Self {
+    pub fn new(
+        cache_dir: PathBuf,
+        picker: Arc<Picker>,
+        thumb_area: Rect,
+        max_full_dim: u32,
+        crop: CropAspect,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             tx,
@@ -142,6 +199,7 @@ impl ThumbWorker {
             picker,
             thumb_area,
             max_full_dim,
+            crop,
         }
     }
 
@@ -153,8 +211,9 @@ impl ThumbWorker {
         let path = entry.path.clone();
         let picker = Arc::clone(&self.picker);
         let area = self.thumb_area;
+        let crop = self.crop;
         rayon::spawn(move || {
-            let result = load_thumbnail(&entry, &cache_dir).and_then(|img| {
+            let result = load_thumbnail(&entry, &cache_dir, crop).and_then(|img| {
                 picker
                     .new_protocol(img, area, Resize::Fit(None))
                     .map_err(|e| anyhow::anyhow!("{e}"))
