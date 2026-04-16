@@ -1,6 +1,10 @@
 //! Directory scanning. Produces a Vec<Entry> for the given directory:
 //! a "Parent" entry first if not at the filesystem root, then directories,
 //! then image files (sorted alphabetically within each group).
+//!
+//! PDFs are included in the image list. They are rasterized on demand by
+//! [`crate::thumbnail`] via the `pdftoppm` helper (from poppler-utils), which
+//! must be on `PATH` at runtime for PDFs to render.
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -34,7 +38,7 @@ impl Entry {
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "ico", "tif", "tiff", "webp", "avif", "pnm", "pbm", "pgm",
-    "ppm", "tga", "dds", "ff", "qoi", "hdr", "exr",
+    "ppm", "tga", "dds", "ff", "qoi", "hdr", "exr", "pdf",
 ];
 
 fn is_image_ext(path: &Path) -> bool {
@@ -45,7 +49,17 @@ fn is_image_ext(path: &Path) -> bool {
             IMAGE_EXTENSIONS.iter().any(|ext| *ext == lower)
         })
         .unwrap_or(false)
-    }
+}
+
+/// True if `path` has a `.pdf` extension (case-insensitive). PDFs live in the
+/// same entry list as images but go through a separate rasterization path in
+/// [`crate::thumbnail`].
+pub fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
 
 /// Scan `dir` and return entries: ".." (if applicable), subdirs, then images.
 pub fn scan(dir: &Path) -> Result<Vec<Entry>> {
