@@ -429,6 +429,9 @@ impl App {
     }
 
     fn handle_key_fullscreen(&mut self, key: KeyEvent) {
+        // Clear any transient status from the previous keypress so messages
+        // like "Fit"/"Fill"/"Copied …" don't shadow the per-image info bar.
+        self.status = None;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.fullscreen_idx = None,
             KeyCode::Left | KeyCode::Char('h') => self.fullscreen_step(-1),
