@@ -44,6 +44,14 @@ glry [PATH]
 Your terminal must support an inline-graphics protocol. Known to work in
 Kitty, WezTerm, Ghostty, iTerm2, and any Sixel-capable terminal.
 
+On Linux, the `y` (copy-to-clipboard) key shells out to a helper that owns the
+clipboard selection after glry exits. Install the one matching your session:
+
+- **Wayland:** `wl-clipboard` (provides `wl-copy`)
+- **X11:** `xclip`
+
+macOS and Windows work out of the box.
+
 ### Keys
 
 | Key                      | Action                              |
@@ -55,6 +63,7 @@ Kitty, WezTerm, Ghostty, iTerm2, and any Sixel-capable terminal.
 | `Tab`                    | Toggle grid / list view             |
 | `Enter`                  | Open image fullscreen, or enter dir |
 | `Backspace`              | Go to parent directory              |
+| `y`                      | Copy selected image to clipboard    |
 | `Esc` / `q`              | Exit fullscreen, or quit            |
 | `Ctrl-C`                 | Quit                                |
 

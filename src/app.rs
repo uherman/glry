@@ -350,21 +350,83 @@ impl App {
             .into_owned();
 
         match crate::thumbnail::load_original(&path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let data = arboard::ImageData {
-                    width: rgba.width() as usize,
-                    height: rgba.height() as usize,
-                    bytes: std::borrow::Cow::Borrowed(rgba.as_raw()),
-                };
-                match arboard::Clipboard::new().and_then(|mut cb| cb.set_image(data)) {
-                    Ok(()) => self.status = Some(format!("Copied {name}")),
-                    Err(e) => self.status = Some(format!("Clipboard error: {e}")),
-                }
-            }
+            Ok(img) => match copy_image(img) {
+                Ok(()) => self.status = Some(format!("Copied {name}")),
+                Err(e) => self.status = Some(format!("Clipboard error: {e:#}")),
+            },
             Err(e) => self.status = Some(format!("Could not load image: {e:#}")),
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copy_image(img: DynamicImage) -> Result<()> {
+    let rgba = img.to_rgba8();
+    let data = arboard::ImageData {
+        width: rgba.width() as usize,
+        height: rgba.height() as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba.as_raw()),
+    };
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_image(data))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+// On Linux the clipboard is owned by the running process, so `arboard`'s
+// content disappears when glry exits. `wl-copy` and `xclip` both fork a
+// daemon that outlives us, so shell out to whichever matches the session.
+#[cfg(target_os = "linux")]
+fn copy_image(img: DynamicImage) -> Result<()> {
+    use anyhow::Context;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .context("encoding PNG for clipboard")?;
+
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let (cmd, args, install_hint): (&str, &[&str], &str) = if wayland {
+        (
+            "wl-copy",
+            &["--type", "image/png"],
+            "install `wl-clipboard` (e.g. `pacman -S wl-clipboard`)",
+        )
+    } else {
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-i"],
+            "install `xclip` (e.g. `pacman -S xclip`)",
+        )
+    };
+
+    let mut child = match Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("`{cmd}` not found — {install_hint}");
+        }
+        Err(e) => return Err(e).context(format!("spawning {cmd}")),
+    };
+
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    stdin
+        .write_all(&png)
+        .with_context(|| format!("writing image to {cmd}"))?;
+    drop(stdin);
+
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for {cmd}"))?;
+    if !status.success() {
+        anyhow::bail!("{cmd} exited with {status}");
+    }
+    Ok(())
 }
 
 /// Returns the index of the first entry that is selectable on entry into a
