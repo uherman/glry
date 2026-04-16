@@ -7,7 +7,7 @@ mod list;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, ViewMode};
@@ -60,8 +60,8 @@ fn render_header(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     );
     let p = Paragraph::new(line).style(
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(app.theme.header_fg)
+            .bg(app.theme.header_bg)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(p, area);

@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::config::Theme;
 use crate::scan::{self, Entry, ImageEntry};
 use crate::thumbnail::{LoadKind, LoadPayload, ThumbWorker};
 
@@ -66,10 +67,18 @@ pub struct App {
     pub last_grid_cols: u16,
     /// Top row offset for the grid view's vertical scroll.
     pub grid_scroll_row: usize,
+
+    /// Color palette loaded from the user config.
+    pub theme: Theme,
 }
 
 impl App {
-    pub fn new(start_dir: PathBuf, picker: Arc<Picker>, worker: ThumbWorker) -> Result<Self> {
+    pub fn new(
+        start_dir: PathBuf,
+        picker: Arc<Picker>,
+        worker: ThumbWorker,
+        theme: Theme,
+    ) -> Result<Self> {
         let entries = scan::scan(&start_dir)?;
         let selected = first_selectable(&entries);
         let loading_proto = picker.new_resize_protocol(DynamicImage::new_rgba8(1, 1));
@@ -93,6 +102,7 @@ impl App {
             dirty: true,
             last_grid_cols: 1,
             grid_scroll_row: 0,
+            theme,
         })
     }
 

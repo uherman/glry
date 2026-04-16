@@ -75,6 +75,30 @@ JPEG, PNG, GIF, BMP, ICO, TIFF, WebP, AVIF, PNM/PBM/PGM/PPM, TGA, DDS, FarbFeld,
 QOI, HDR, EXR — whatever the [`image`](https://crates.io/crates/image) crate
 decodes.
 
+## Configuration
+
+glry reads an optional theme file from `~/.config/glry/config` (or the
+platform equivalent on macOS/Windows). On first run glry writes a commented
+template there with the defaults shown; uncomment any line to override.
+Unknown keys and bad values are reported on stderr and skipped.
+
+Format is `key = value`, one per line, with `#` for comments. Values are
+ratatui color strings: a named color (`black`, `red`, `darkgray`, …), an
+8-bit index (`0`–`255`), or a `#rrggbb` hex code.
+
+```ini
+# ~/.config/glry/config
+header_fg    = "black"
+header_bg    = "cyan"
+selection_fg = "black"
+selection_bg = "cyan"
+status_fg    = "gray"
+status_bg    = "black"
+directory_fg = "yellow"
+error_fg     = "red"
+loading_fg   = "darkgray"
+```
+
 ## Cache
 
 Thumbnails are written to `~/.cache/glry/` (or the platform equivalent) as PNGs

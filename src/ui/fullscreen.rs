@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
 use ratatui_image::StatefulImage;
 
@@ -16,6 +16,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(Entry::Image(img)) = app.entries.get(idx).cloned() else {
         return;
     };
+    let theme = app.theme;
     app.ensure_full(&img.path);
     if let Some(proto) = app.fulls.get_mut(&img.path) {
         let widget = StatefulImage::default();
@@ -26,7 +27,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
         let widget = StatefulImage::default();
         f.render_stateful_widget(widget, area, &mut app.loading_proto);
         let p = Paragraph::new(format!("\n  load error: {err}"))
-            .style(Style::default().fg(Color::Red));
+            .style(Style::default().fg(theme.error_fg));
         f.render_widget(p, area);
     } else {
         // Render the blank placeholder to properly clear the previous image
@@ -42,7 +43,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
                 .alignment(Alignment::Center)
                 .style(
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme.loading_fg)
                         .add_modifier(Modifier::ITALIC),
                 );
             f.render_widget(p, inner);

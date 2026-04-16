@@ -3,7 +3,7 @@
 use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
@@ -20,7 +20,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             None => " (empty directory) ".to_string(),
         }
     };
-    let p = Paragraph::new(text).style(Style::default().fg(Color::Gray).bg(Color::Black));
+    let p = Paragraph::new(text)
+        .style(Style::default().fg(app.theme.status_fg).bg(app.theme.status_bg));
     f.render_widget(p, area);
 }
 

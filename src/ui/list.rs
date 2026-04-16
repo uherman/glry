@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui_image::StatefulImage;
 
@@ -37,8 +37,8 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::RIGHT))
         .highlight_style(
             Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
+                .bg(app.theme.selection_bg)
+                .fg(app.theme.selection_fg)
                 .add_modifier(Modifier::BOLD),
         );
     let mut state = ListState::default();
@@ -60,21 +60,22 @@ fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
                 _ => unreachable!(),
             };
             let p = Paragraph::new(format!("\n\n  {label}"))
-                .style(Style::default().fg(Color::Yellow));
+                .style(Style::default().fg(app.theme.directory_fg));
             f.render_widget(p, area);
         }
         Entry::Image(img) => {
+            let theme = app.theme;
             app.ensure_full(&img.path);
             if let Some(proto) = app.fulls.get_mut(&img.path) {
                 let widget = StatefulImage::default();
                 f.render_stateful_widget(widget, area, proto);
             } else if let Some(err) = app.errors.get(&img.path) {
                 let p = Paragraph::new(format!("\n  load error: {err}"))
-                    .style(Style::default().fg(Color::Red));
+                    .style(Style::default().fg(theme.error_fg));
                 f.render_widget(p, area);
             } else {
                 let p = Paragraph::new("\n  loading…")
-                    .style(Style::default().fg(Color::DarkGray));
+                    .style(Style::default().fg(theme.loading_fg));
                 f.render_widget(p, area);
             }
         }

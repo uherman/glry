@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
 use ratatui_image::Image;
 
@@ -81,12 +81,12 @@ fn render_cell(
     match entry {
         Entry::Parent(_) => {
             let p = Paragraph::new("\n  [ .. ]")
-                .style(Style::default().fg(Color::Yellow));
+                .style(Style::default().fg(app.theme.directory_fg));
             f.render_widget(p, img_area);
         }
         Entry::SubDir { .. } => {
             let p = Paragraph::new("\n   📁")
-                .style(Style::default().fg(Color::Yellow));
+                .style(Style::default().fg(app.theme.directory_fg));
             f.render_widget(p, img_area);
         }
         Entry::Image(img) => {
@@ -94,11 +94,11 @@ fn render_cell(
                 f.render_widget(Image::new(proto), img_area);
             } else if let Some(err) = app.errors.get(&img.path) {
                 let p = Paragraph::new(format!("err\n{err}"))
-                    .style(Style::default().fg(Color::Red));
+                    .style(Style::default().fg(app.theme.error_fg));
                 f.render_widget(p, img_area);
             } else {
                 let p = Paragraph::new("...")
-                    .style(Style::default().fg(Color::DarkGray));
+                    .style(Style::default().fg(app.theme.loading_fg));
                 f.render_widget(p, img_area);
             }
         }
@@ -110,8 +110,8 @@ fn render_cell(
     let mut style = Style::default();
     if selected {
         style = style
-            .bg(Color::Cyan)
-            .fg(Color::Black)
+            .bg(app.theme.selection_bg)
+            .fg(app.theme.selection_fg)
             .add_modifier(Modifier::BOLD);
     }
     let p = Paragraph::new(truncated).style(style);
