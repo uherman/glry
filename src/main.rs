@@ -16,12 +16,14 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui_image::picker::Picker;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::app::App;
+use crate::app::{App, GRID_CELL_H, GRID_CELL_W};
 use crate::thumbnail::ThumbWorker;
 
 #[derive(Parser, Debug)]
@@ -85,26 +87,49 @@ fn install_panic_hook() {
 
 fn run(terminal: &mut Term, start_dir: PathBuf, picker: Picker) -> Result<()> {
     let cache_dir = cache::cache_dir()?;
-    let worker = ThumbWorker::new(cache_dir);
+
+    // Compute the maximum useful pixel dimension for full-resolution images.
+    // Anything larger than the terminal's pixel area is wasted work.
+    let term_size = terminal.size()?;
+    let font_size = picker.font_size();
+    let max_full_dim = (term_size.width as u32 * font_size.0 as u32)
+        .max(term_size.height as u32 * font_size.1 as u32)
+        .max(1920); // floor at 1080p so small terminals still get decent quality
+
+    let picker = Arc::new(picker);
+    let thumb_area = Rect::new(0, 0, GRID_CELL_W, GRID_CELL_H);
+    let worker = ThumbWorker::new(cache_dir, Arc::clone(&picker), thumb_area, max_full_dim);
     let mut app = App::new(start_dir, picker, worker)?;
 
     while !app.should_quit {
         // Drain any completed background loads before rendering.
-        app.drain_loads();
+        if app.drain_loads() {
+            app.dirty = true;
+        }
 
-        execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
-        terminal.draw(|f| ui::render(f, &mut app))?;
-        execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
+        if app.dirty {
+            execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+            terminal.draw(|f| ui::render(f, &mut app))?;
+            execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
+            app.dirty = false;
+        }
 
-        // Wait up to 100 ms for an input event; loop again either way so
-        // background completions are picked up promptly.
-        if event::poll(Duration::from_millis(100))? {
+        // Adaptive poll: short timeout when loads are in-flight for responsive
+        // updates, longer when idle to save CPU.
+        let timeout = if app.has_pending_loads() {
+            Duration::from_millis(32)
+        } else {
+            Duration::from_millis(100)
+        };
+
+        if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => app.handle_key(k)?,
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    app.handle_key(k)?;
+                    app.dirty = true;
+                }
                 Event::Resize(_, _) => {
-                    // Rebuilt grid Protocols are tied to the old cell size; if
-                    // the user dramatically resizes, we keep them as-is for v1.
-                    // StatefulProtocols (fullscreen / preview) auto-resize.
+                    app.dirty = true;
                 }
                 _ => {}
             }

@@ -3,8 +3,12 @@
 //! Cache key is derived from the canonical source path + mtime + size. Files are
 //! written atomically (temp + rename) to prevent partial reads after a crash.
 //! Lookup is by filename only; no manifest/index file.
+//!
+//! Thumbnails are stored as raw RGBA pixel data (8 bytes header + pixels) for
+//! maximum read/write speed — no PNG encode/decode overhead.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use image::DynamicImage;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,14 +39,46 @@ pub fn key_for(entry: &ImageEntry) -> u64 {
     h.digest()
 }
 
-/// Path where the cached PNG for `key` lives (file may or may not exist).
+/// Path where the cached thumbnail for `key` lives (file may or may not exist).
 pub fn path_for(cache_dir: &Path, key: u64) -> PathBuf {
-    cache_dir.join(format!("{:016x}.png", key))
+    cache_dir.join(format!("{:016x}.raw", key))
 }
 
-/// Atomically write `data` to `dest` (write to dest.tmp, then rename).
+/// Write a thumbnail as raw RGBA pixel data: `[u32 width][u32 height][RGBA bytes]`.
+pub fn write_thumbnail(dest: &Path, img: &DynamicImage) -> Result<()> {
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let pixel_bytes = rgba.as_raw();
+    let mut data = Vec::with_capacity(8 + pixel_bytes.len());
+    data.extend_from_slice(&w.to_le_bytes());
+    data.extend_from_slice(&h.to_le_bytes());
+    data.extend_from_slice(pixel_bytes);
+    atomic_write(dest, &data)
+}
+
+/// Read a cached thumbnail from raw RGBA pixel data.
+pub fn read_thumbnail(path: &Path) -> Result<DynamicImage> {
+    let data = fs::read(path).with_context(|| format!("reading cache {}", path.display()))?;
+    if data.len() < 8 {
+        bail!("cache file too small");
+    }
+    let w = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    let h = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    let expected = 8 + (w as usize) * (h as usize) * 4;
+    if data.len() != expected {
+        bail!(
+            "cache size mismatch: expected {expected}, got {}",
+            data.len()
+        );
+    }
+    let buf = image::ImageBuffer::from_raw(w, h, data[8..].to_vec())
+        .context("invalid image dimensions in cache")?;
+    Ok(DynamicImage::ImageRgba8(buf))
+}
+
+/// Atomically write `data` to `dest` (write to temp, then rename).
 pub fn atomic_write(dest: &Path, data: &[u8]) -> Result<()> {
-    let tmp = dest.with_extension("png.tmp");
+    let tmp = dest.with_extension("tmp");
     {
         let mut f = fs::File::create(&tmp)
             .with_context(|| format!("creating temp file {}", tmp.display()))?;

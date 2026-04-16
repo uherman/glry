@@ -3,15 +3,14 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use image::DynamicImage;
-use ratatui::layout::Rect;
-use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::{Protocol, StatefulProtocol};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::scan::{self, Entry, ImageEntry};
-use crate::thumbnail::{LoadKind, ThumbWorker};
+use crate::thumbnail::{LoadKind, LoadPayload, ThumbWorker};
 
 /// Fixed grid cell size in terminal cells. Each thumbnail occupies this area.
 pub const GRID_CELL_W: u16 = 16;
@@ -47,7 +46,7 @@ pub struct App {
     /// In-flight (path, kind) to dedupe dispatches.
     pub requested: HashSet<(PathBuf, LoadKind)>,
 
-    pub picker: Picker,
+    pub picker: Arc<Picker>,
     pub worker: ThumbWorker,
     /// Tiny placeholder protocol rendered while a full image is loading.
     /// Going through StatefulImage ensures protocol-specific cleanup of the
@@ -59,6 +58,8 @@ pub struct App {
     pub should_quit: bool,
     /// Status-bar message (transient feedback).
     pub status: Option<String>,
+    /// Whether the UI needs to be redrawn.
+    pub dirty: bool,
 
     /// Number of columns the grid view rendered last frame. Used so j/k
     /// jumps a row's worth of entries.
@@ -68,7 +69,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(start_dir: PathBuf, picker: Picker, worker: ThumbWorker) -> Result<Self> {
+    pub fn new(start_dir: PathBuf, picker: Arc<Picker>, worker: ThumbWorker) -> Result<Self> {
         let entries = scan::scan(&start_dir)?;
         let selected = first_selectable(&entries);
         let loading_proto = picker.new_resize_protocol(DynamicImage::new_rgba8(1, 1));
@@ -89,6 +90,7 @@ impl App {
             pending_g: false,
             should_quit: false,
             status: None,
+            dirty: true,
             last_grid_cols: 1,
             grid_scroll_row: 0,
         })
@@ -139,38 +141,41 @@ impl App {
         self.worker.dispatch_full(path.clone());
     }
 
+    /// Returns `true` if any in-flight loads are pending (used for adaptive
+    /// poll timing in the event loop).
+    pub fn has_pending_loads(&self) -> bool {
+        !self.requested.is_empty()
+    }
+
     /// Drain completed loads from the worker and turn them into protocols.
-    pub fn drain_loads(&mut self) {
-        for done in self.worker.drain() {
+    /// Returns `true` if any loads were processed.
+    pub fn drain_loads(&mut self) -> bool {
+        let completed = self.worker.drain();
+        if completed.is_empty() {
+            return false;
+        }
+        for done in completed {
             self.requested.remove(&(done.source_path.clone(), done.kind));
-            match done.result {
+            match done.payload {
                 Err(e) => {
                     self.errors
-                        .insert(done.source_path.clone(), format!("{e:#}"));
+                        .insert(done.source_path, format!("{e:#}"));
                 }
-                Ok(img) => match done.kind {
-                    LoadKind::Thumb => {
-                        // Build a fixed-size Protocol fitted to one grid cell.
-                        let area = Rect::new(0, 0, GRID_CELL_W, GRID_CELL_H);
-                        match self.picker.new_protocol(img, area, Resize::Fit(None)) {
-                            Ok(proto) => {
-                                self.thumbs.insert(done.source_path, proto);
-                            }
-                            Err(e) => {
-                                self.errors
-                                    .insert(done.source_path, format!("protocol: {e:#}"));
-                            }
-                        }
-                    }
-                    LoadKind::Full => {
-                        let dims = (img.width(), img.height());
-                        let proto = self.picker.new_resize_protocol(img);
-                        self.full_dims.insert(done.source_path.clone(), dims);
-                        self.fulls.insert(done.source_path, proto);
-                    }
-                },
+                Ok(LoadPayload::Thumb(proto)) => {
+                    self.thumbs.insert(done.source_path, proto);
+                }
+                Ok(LoadPayload::Full {
+                    image,
+                    original_dims,
+                }) => {
+                    self.full_dims
+                        .insert(done.source_path.clone(), original_dims);
+                    let proto = self.picker.new_resize_protocol(image);
+                    self.fulls.insert(done.source_path, proto);
+                }
             }
         }
+        true
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
