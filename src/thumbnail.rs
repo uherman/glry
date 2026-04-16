@@ -18,12 +18,13 @@ use ratatui_image::protocol::Protocol;
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cache;
-use crate::scan::ImageEntry;
+use crate::scan::{self, ImageEntry};
 
 /// Maximum dimension (width or height in pixels) for grid thumbnails.
 pub const THUMB_MAX_DIM: u32 = 256;
@@ -160,10 +161,7 @@ pub fn is_animated_path(path: &Path) -> bool {
 /// Decode every frame of an animated image, downscaling each to at most
 /// `max_dim` pixels on the longest side. Returns the frames with their delays
 /// and the original pixel dimensions of the first frame.
-pub fn load_animation(
-    path: &Path,
-    max_dim: u32,
-) -> Result<(Vec<AnimationFrame>, (u32, u32))> {
+pub fn load_animation(path: &Path, max_dim: u32) -> Result<(Vec<AnimationFrame>, (u32, u32))> {
     use image::codecs::gif::GifDecoder;
 
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -204,13 +202,62 @@ pub fn load_animation(
     Ok((out, original_dims))
 }
 
-/// Decode an image and apply EXIF orientation.
+/// Decode an image and apply EXIF orientation. PDFs skip the EXIF path and are
+/// rasterized via [`rasterize_pdf_first_page`] instead.
 fn decode_with_orientation(path: &Path) -> Result<DynamicImage> {
+    if scan::is_pdf_path(path) {
+        return rasterize_pdf_first_page(path);
+    }
     // Read EXIF first (cheap — just the file header) so the OS page cache is
     // warm for the full decode that follows.
     let orientation = read_exif_orientation(path).unwrap_or(1);
     let img = image::open(path).with_context(|| format!("decoding {}", path.display()))?;
     Ok(apply_orientation(img, orientation))
+}
+
+/// Resolution in DPI used to rasterize PDF pages. 150 is a reasonable
+/// compromise — sharp enough for fullscreen rendering in a terminal, small
+/// enough that the thumbnail downsample is quick.
+const PDF_DPI: u32 = 150;
+
+/// Rasterize page 1 of `path` via the `pdftoppm` CLI (from poppler-utils).
+/// The rendered PNG is written to a unique tempfile, decoded with `image`,
+/// then deleted. Returns a helpful install hint if `pdftoppm` is not found.
+fn rasterize_pdf_first_page(path: &Path) -> Result<DynamicImage> {
+    let tmp = std::env::temp_dir();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stem = format!("glry-pdf-{}-{}", std::process::id(), nonce);
+    let prefix = tmp.join(&stem);
+    let out = tmp.join(format!("{stem}.png"));
+
+    let dpi = PDF_DPI.to_string();
+    let output = Command::new("pdftoppm")
+        .args(["-f", "1", "-l", "1", "-r", &dpi, "-png", "-singlefile"])
+        .arg(path)
+        .arg(&prefix)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "`pdftoppm` not found — install poppler to render PDFs (e.g. `brew install poppler`, `apt install poppler-utils`)"
+                )
+            } else {
+                anyhow::Error::new(e).context("spawning pdftoppm")
+            }
+        })?;
+    if !output.status.success() {
+        let _ = fs::remove_file(&out);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("pdftoppm failed for {}: {}", path.display(), stderr.trim());
+    }
+
+    let img =
+        image::open(&out).with_context(|| format!("decoding rasterized {}", out.display()))?;
+    let _ = fs::remove_file(&out);
+    Ok(img)
 }
 
 /// Read the EXIF orientation tag (1-8). Returns None if absent or unreadable.

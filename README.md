@@ -47,6 +47,8 @@ graphics protocol (Kitty, iTerm2, or Sixel) and renders accordingly.
 - **Parallel decoding** with rayon; the UI remains responsive while
   thumbnails load.
 - **Clipboard integration** to copy the selected image.
+- **PDF thumbnails** — the first page of each `.pdf` renders as a thumbnail
+  and in the fullscreen viewer, when `pdftoppm` (poppler) is on `PATH`.
 
 ## Requirements
 
@@ -58,6 +60,17 @@ graphics protocol (Kitty, iTerm2, or Sixel) and renders accordingly.
   - `xclip` (X11)
 
   macOS and Windows work without additional dependencies.
+- **Optional**: `pdftoppm` from [poppler] / poppler-utils on `PATH` to
+  render PDFs. Without it, PDFs still appear in listings but show a decode
+  error instead of a thumbnail.
+  - macOS: `brew install poppler`
+  - Debian/Ubuntu: `apt install poppler-utils`
+  - Arch: `pacman -S poppler`
+  - Windows: bundled with most MiKTeX/MSYS2 distributions, or install
+    [poppler-windows][poppler-win] and add `bin/` to `PATH`.
+
+[poppler]: https://poppler.freedesktop.org/
+[poppler-win]: https://github.com/oschwartz10612/poppler-windows
 
 ## Installation
 
@@ -114,6 +127,10 @@ In the fullscreen viewer:
 JPEG, PNG, GIF, BMP, ICO, TIFF, WebP, AVIF, PNM/PBM/PGM/PPM, TGA, DDS,
 FarbFeld, QOI, HDR, and EXR — anything decoded by the
 [`image`](https://crates.io/crates/image) crate.
+
+PDFs are also listed, with the first page rendered as the thumbnail and as
+the fullscreen image. Rasterization is done by shelling out to `pdftoppm`
+(see Requirements).
 
 ## Configuration
 
